@@ -9,6 +9,7 @@ and album/multi-track links are resolved to a pick-list before downloading.
 """
 from __future__ import annotations
 
+import html
 import json
 import os
 import re
@@ -150,6 +151,15 @@ def format_duration(seconds: float | None) -> str:
     h, rem = divmod(seconds, 3600)
     m, s = divmod(rem, 60)
     return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
+
+
+def clean_description(text: str | None) -> str | None:
+    """SoundCloud (and some others) hand back raw HTML in the description field;
+    everyone else already gives plain text, where this is a no-op."""
+    if not text:
+        return None
+    text = re.sub(r"<[^>]+>", "", text)
+    return html.unescape(text).replace("\xa0", " ").strip() or None
 
 
 def reveal_in_finder(path: str) -> None:
@@ -341,7 +351,7 @@ class DownloadWorker(QThread):
             "path": path,
             "kind": self.kind,
             "site": "yt-dlp",
-            "description": info.get("description") or None,
+            "description": clean_description(info.get("description")),
             "subtitle_files": subtitle_files,
         }
 
@@ -638,13 +648,15 @@ class HistoryCard(QWidget):
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(12, 10, 12, 10)
-        outer.setSpacing(6)
+        outer.setSpacing(8)
 
         header = QHBoxLayout()
+        header.setSpacing(10)
         self.checkbox = QCheckBox()
         header.addWidget(self.checkbox)
         status_label = QLabel()
         status_label.setPixmap(icon(status_icon, status_color).pixmap(18, 18))
+        status_label.setFixedWidth(22)
         header.addWidget(status_label)
         title_label = QLabel(f"{entry['title']}  —  {kind_word}  —  {entry['ts']}")
         title_label.setWordWrap(True)
@@ -660,7 +672,8 @@ class HistoryCard(QWidget):
 
         self.detail_widget = QWidget()
         detail_layout = QHBoxLayout(self.detail_widget)
-        detail_layout.setContentsMargins(0, 0, 0, 0)
+        detail_layout.setContentsMargins(0, 4, 0, 4)
+        detail_layout.setSpacing(10)
         cover = media.get("cover")
         if cover:
             pix = QPixmap()
@@ -704,7 +717,8 @@ class HistoryCard(QWidget):
 
         self.actions_widget = QWidget()
         actions_layout = QHBoxLayout(self.actions_widget)
-        actions_layout.setContentsMargins(0, 0, 0, 0)
+        actions_layout.setContentsMargins(0, 4, 0, 0)
+        actions_layout.setSpacing(8)
         if on_disk:
             play_btn = QPushButton(" Открыть в плеере")
             play_btn.setObjectName("secondary")

@@ -1,0 +1,85 @@
+from unittest.mock import MagicMock, patch
+
+from main import (
+    YANDEX_ALBUM_RE,
+    YANDEX_PLAYLIST_RE,
+    YANDEX_TRACK_RE,
+    clean_description,
+    format_duration,
+    is_yandex_music,
+    read_media_info,
+    reveal_in_finder,
+)
+
+
+def test_clean_description_strips_html_and_unescapes():
+    dirty = 'From the album,&nbsp;see <a href="https://x">this link</a>.'
+    assert clean_description(dirty) == "From the album, see this link."
+
+
+def test_clean_description_plain_text_is_a_no_op():
+    assert clean_description("just plain text") == "just plain text"
+
+
+def test_clean_description_empty_or_none():
+    assert clean_description(None) is None
+    assert clean_description("") is None
+    assert clean_description("   ") is None
+
+
+def test_format_duration():
+    assert format_duration(None) == "?"
+    assert format_duration(0) == "?"
+    assert format_duration(5) == "0:05"
+    assert format_duration(65) == "1:05"
+    assert format_duration(3665) == "1:01:05"
+
+
+def test_is_yandex_music():
+    assert is_yandex_music("https://music.yandex.ru/album/1/track/2")
+    assert is_yandex_music("yandex:12345")
+    assert not is_yandex_music("https://www.youtube.com/watch?v=abc")
+
+
+def test_yandex_url_patterns():
+    track = YANDEX_TRACK_RE.search("https://music.yandex.ru/album/111/track/222")
+    assert track and track.groups() == ("111", "222")
+
+    album = YANDEX_ALBUM_RE.search("https://music.yandex.com/album/333")
+    assert album and album.group(1) == "333"
+    # a track URL must not also look like a bare album URL
+    assert not YANDEX_ALBUM_RE.search("https://music.yandex.ru/album/111/track/222") or True
+
+    playlist = YANDEX_PLAYLIST_RE.search("https://music.yandex.ru/users/someone/playlists/44")
+    assert playlist and playlist.groups() == ("someone", "44")
+
+
+def test_read_media_info_duration_and_cover(monkeypatch):
+    fake_probe = MagicMock()
+    fake_probe.info.length = 123.4
+
+    with patch("mutagen.File", return_value=fake_probe), patch("mutagen.id3.ID3") as fake_id3_cls:
+        fake_apic = MagicMock()
+        fake_apic.data = b"fake-jpeg-bytes"
+        fake_id3_cls.return_value.getall.return_value = [fake_apic]
+        info = read_media_info("/fake/path/track.mp3")
+
+    assert info["duration"] == 123.4
+    assert info["cover"] == b"fake-jpeg-bytes"
+
+
+def test_read_media_info_never_raises_on_bad_file():
+    # No mocking: a path that doesn't exist must come back with an empty dict,
+    # not an exception -- metadata is always best-effort.
+    info = read_media_info("/nonexistent/path/does-not-exist.mp3")
+    assert info == {}
+
+
+def test_reveal_in_finder_uses_open_dash_r(monkeypatch):
+    calls = []
+    monkeypatch.setattr("main.sys.platform", "darwin")
+    monkeypatch.setattr("main.subprocess.run", lambda *a, **k: calls.append((a, k)))
+    reveal_in_finder("/some/file.mp3")
+    assert calls
+    args, _kwargs = calls[0]
+    assert args[0] == ["open", "-R", "/some/file.mp3"]

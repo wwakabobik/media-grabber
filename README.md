@@ -1,6 +1,7 @@
 # media-grabber
 
 [![Lint & Test](https://github.com/wwakabobik/media-grabber/actions/workflows/lint.yml/badge.svg?branch=master)](https://github.com/wwakabobik/media-grabber/actions/workflows/lint.yml)
+[![Release](https://img.shields.io/github/v/release/wwakabobik/media-grabber)](https://github.com/wwakabobik/media-grabber/releases)
 [![License: MIT](https://img.shields.io/github/license/wwakabobik/media-grabber)](LICENSE)
 ![Python](https://img.shields.io/badge/python-3.12%2B-blue)
 ![Platform](https://img.shields.io/badge/platform-macOS-lightgrey)
@@ -140,14 +141,20 @@ The result is in `dist/MediaGrabber.app` — copy it to `/Applications` to insta
 
 ## Contributing
 
-`master` is protected — all changes land via pull request and must pass CI (`ruff` + `pytest`)
-before they can be merged.
+See [CONTRIBUTING.md](CONTRIBUTING.md). Short version: `master` is protected — every change
+lands via pull request and must pass CI (`ruff` + `pytest`, all green) before it can be merged,
+including for the repo owner. Every merge gets a semver tag + GitHub Release (see
+[CHANGELOG.md](CHANGELOG.md)) — bump `pyproject.toml`'s version yourself for a real
+feature/breaking change, otherwise it gets an automatic patch bump on merge.
 
 ```bash
 uv sync --all-groups
 uv run ruff check .
 uv run pytest -q
 ```
+
+Found a security issue? See [SECURITY.md](SECURITY.md) — please don't open a public issue for
+it.
 
 ## Donations
 
