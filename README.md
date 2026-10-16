@@ -6,19 +6,29 @@
 ![Platform](https://img.shields.io/badge/platform-macOS-lightgrey)
 [![PySide6](https://img.shields.io/badge/UI-PySide6%20(Qt)-41cd52)](https://doc.qt.io/qtforpython/)
 
-A small desktop app: paste a YouTube / Vimeo / Spotify link, pick a format and quality, hit
-download, and watch or listen right in the window — no browser, no external player.
+A small desktop app: paste a YouTube / Vimeo / SoundCloud / VK / Spotify / Yandex Music link
+(including a playlist or album), pick a format and quality, hit download, and watch or listen
+right in the window — no browser, no external player.
 
 ## How it gets the media
 
-- **YouTube / Vimeo** (and anything [yt-dlp](https://github.com/yt-dlp/yt-dlp) supports) are
-  downloaded directly.
+- **YouTube / Vimeo / SoundCloud / VK** (and anything [yt-dlp](https://github.com/yt-dlp/yt-dlp)
+  supports) are downloaded directly.
 - **Spotify** streams are DRM-protected and can't be ripped from Spotify itself.
   [spotdl](https://github.com/spotDL/spotify-downloader) reads the track's metadata from Spotify
   and pulls the matching audio from YouTube instead — Spotify is only ever used for the lookup.
+- **Yandex Music** tracks download for real (no YouTube-matching detour), but Yandex's API has no
+  anonymous access like Spotify's — you need your own account's OAuth token, set once in
+  **⚙ Настройки**.
+- **Playlists / albums / multi-track links** (YouTube playlists, SoundCloud sets, Spotify
+  albums/playlists, Yandex Music albums/playlists) are detected before downloading: a picker
+  dialog lists every track/video with a checkbox so you choose what actually gets downloaded,
+  then they're fetched one by one with per-item progress.
 
 Realistic format choices: **MP4 / WebM** video, **MP3** audio. AVI isn't offered — none of these
-sites serve it, so there'd be nothing to download into that container.
+sites serve it, so there'd be nothing to download into that container. Spotify and Yandex Music
+are audio-only — picking one of those links greys out the video option instead of letting you
+hit an error.
 
 ## Features
 
@@ -33,9 +43,9 @@ sites serve it, so there'd be nothing to download into that container.
   whose file was removed outside the app is shown greyed out instead of crashing or lying about
   its status. A repeat download of the same title never overwrites the previous file — it gets
   a `(1)`, `(2)`, ... suffix, like a browser's download manager.
+- Playlist/album links open a checkbox picker instead of downloading blind; picked items queue
+  up and download one at a time, each landing in the history individually.
 - Persisted to `~/.config/media-grabber/state.json`.
-- Picking a Spotify URL greys out the video option — Spotify has no video, so there's nothing
-  to offer there.
 - Structured logging ([structlog](https://www.structlog.org/)): human-readable in the console,
   JSON with keyword context (url, kind, path, errors...) in a rotating file at
   `~/.config/media-grabber/logs/media-grabber.log` (5 MB x 5 backups).
@@ -47,6 +57,10 @@ sites serve it, so there'd be nothing to download into that container.
   explicitly prefers H.264 (`avc1`) for video downloads to avoid this.
 - Spotify downloads are a metadata-driven YouTube search (via spotdl), not an actual rip of
   Spotify's own audio stream — quality and match accuracy depend on what's available on YouTube.
+- Yandex Music needs your personal account's OAuth token (there's no public client-credentials
+  flow like Spotify's) — without one, Yandex links fail with a clear "add a token" error.
+- SoundCloud's *original* (highest-quality) format needs login too; without it yt-dlp falls back
+  to the standard transcoded stream, which works fine but isn't the uploader's original file.
 
 ## Quickstart
 
