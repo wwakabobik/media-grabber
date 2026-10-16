@@ -72,6 +72,11 @@ STRINGS: dict[str, dict[str, str]] = {
     "settings.dest_label": {"en": "Download folder:", "ru": "Папка для загрузок:"},
     "button.browse_folder": {"en": "Browse…", "ru": "Обзор…"},
     "settings.language_label": {"en": "Language:", "ru": "Язык:"},
+    "settings.log_rotation_label": {
+        "en": "Log file: max size per file, how many old files to keep, or open it:",
+        "ru": "Лог-файл: макс. размер файла, сколько старых хранить, или открыть его:",
+    },
+    "button.open_log_file": {"en": "Open log file", "ru": "Открыть лог-файл"},
     "kind.video": {"en": "video", "ru": "видео"},
     "kind.audio": {"en": "audio", "ru": "аудио"},
     "card.downloaded": {"en": "Downloaded: {v}", "ru": "Скачано: {v}"},
@@ -101,6 +106,8 @@ STRINGS: dict[str, dict[str, str]] = {
     "button.save_as": {"en": " Save as…", "ru": " Сохранить как…"},
     "heading.history": {"en": "History", "ru": "История"},
     "button.delete_selected": {"en": "Delete selected", "ru": "Удалить выбранное"},
+    "button.select_all_filtered": {"en": "Select all", "ru": "Выбрать всё"},
+    "button.select_none_filtered": {"en": "Clear selection", "ru": "Снять выделение"},
     "search.history_placeholder": {
         "en": "Search history -- title, link, source…",
         "ru": "Поиск по истории — название, ссылка, источник…",

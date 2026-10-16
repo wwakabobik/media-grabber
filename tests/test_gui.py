@@ -1,4 +1,4 @@
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QLabel, QMessageBox, QScrollArea
@@ -166,7 +166,7 @@ def test_playlist_dialog_select_all_and_none(qtbot):
 
 
 def test_settings_dialog_round_trips_token(qtbot):
-    dlg = SettingsDialog("abc123", "/tmp/dest", "en")
+    dlg = SettingsDialog("abc123", "/tmp/dest", "en", 5, 5)
     qtbot.addWidget(dlg)
     assert dlg.token_edit.text() == "abc123"
     dlg.token_edit.setText("  new-token  ")
@@ -174,12 +174,23 @@ def test_settings_dialog_round_trips_token(qtbot):
 
 
 def test_settings_dialog_round_trips_dest_and_language(qtbot):
-    dlg = SettingsDialog("", "/tmp/dest", "en")
+    dlg = SettingsDialog("", "/tmp/dest", "en", 5, 5)
     qtbot.addWidget(dlg)
     assert dlg.dest() == "/tmp/dest"
     assert dlg.language() == "en"
     dlg.language_combo.setCurrentIndex(dlg.language_combo.findData("ru"))
     assert dlg.language() == "ru"
+
+
+def test_settings_dialog_round_trips_log_rotation(qtbot):
+    dlg = SettingsDialog("", "/tmp/dest", "en", 10, 3)
+    qtbot.addWidget(dlg)
+    assert dlg.log_max_mb() == 10
+    assert dlg.log_backup_count() == 3
+    dlg.log_max_mb_spin.setValue(20)
+    dlg.log_backup_count_spin.setValue(1)
+    assert dlg.log_max_mb() == 20
+    assert dlg.log_backup_count() == 1
 
 
 def test_main_window_history_search_filters_by_title(qtbot):
@@ -363,11 +374,15 @@ def test_main_window_player_section_hidden_until_something_is_loaded(qtbot, tmp_
 
 
 def test_main_window_retranslate_ui_switches_button_text(qtbot):
+    import i18n
+
+    # MainWindow() picks up the user's *real* saved language preference on
+    # construction, overriding the autouse reset -- force a known baseline.
     win = MainWindow()
     qtbot.addWidget(win)
+    i18n.set_language("en")
+    win._retranslate_ui()
     assert win.download_btn.text() == "Download"
-
-    import i18n
 
     i18n.set_language("ru")
     try:
@@ -379,13 +394,15 @@ def test_main_window_retranslate_ui_switches_button_text(qtbot):
 
 
 def test_main_window_status_ready_only_shown_pristine(qtbot):
+    import i18n
+
     win = MainWindow()
     qtbot.addWidget(win)
+    i18n.set_language("en")
+    win._retranslate_ui()
     assert win.status_label.text() == "Ready"
 
     win._set_status("Done: thing", "ok")
-    import i18n
-
     i18n.set_language("ru")
     try:
         win._retranslate_ui()
@@ -463,6 +480,31 @@ def test_main_window_on_theme_changed_persists_and_applies(qtbot):
         mocked_save.assert_called_once_with(win.state)
 
 
+def test_main_window_open_settings_persists_and_applies_log_rotation(qtbot):
+    from PySide6.QtWidgets import QDialog
+
+    win = MainWindow()
+    qtbot.addWidget(win)
+
+    fake_dlg = MagicMock()
+    fake_dlg.exec.return_value = QDialog.Accepted
+    fake_dlg.token.return_value = "tok"
+    fake_dlg.dest.return_value = "/tmp/dest"
+    fake_dlg.language.return_value = "en"
+    fake_dlg.log_max_mb.return_value = 42
+    fake_dlg.log_backup_count.return_value = 9
+
+    with patch("main.SettingsDialog", return_value=fake_dlg), patch("main.save_state") as mocked_save, patch(
+        "main.apply_log_rotation_settings"
+    ) as mocked_apply:
+        win._open_settings()
+
+    assert win.state["log_max_mb"] == 42
+    assert win.state["log_backup_count"] == 9
+    mocked_save.assert_called_once_with(win.state)
+    mocked_apply.assert_called_once_with(42, 9)
+
+
 def test_main_window_system_theme_follows_os_until_an_explicit_choice_is_made(qtbot):
     win = MainWindow()
     qtbot.addWidget(win)
@@ -504,6 +546,34 @@ def test_main_window_history_filters_by_kind_and_status(qtbot, tmp_path):
 
     win.filter_status.setCurrentIndex(win.filter_status.findData("error"))
     assert [c.entry["title"] for c in win._history_cards] == ["C"]
+
+
+def test_main_window_select_all_only_checks_the_currently_filtered_cards(qtbot, tmp_path):
+    present = tmp_path / "present.mp3"
+    present.write_bytes(b"x")
+    win = MainWindow()
+    qtbot.addWidget(win)
+    win.state["history"] = [
+        {"ts": "now", "url": "https://a", "title": "A", "kind": "audio",
+         "container": "mp3", "site": "yt-dlp", "status": "ok", "path": str(present)},
+        {"ts": "now", "url": "https://b", "title": "B", "kind": "video",
+         "container": "mp4", "site": "yt-dlp", "status": "ok", "path": str(tmp_path / "gone.mp4")},
+    ]
+    win._render_history()
+    win.filter_kind.setCurrentIndex(win.filter_kind.findData("audio"))
+    assert [c.entry["title"] for c in win._history_cards] == ["A"]
+
+    win._set_all_history_checked(True)
+    assert all(c.checkbox.isChecked() for c in win._history_cards)  # only "A" is rendered right now
+
+    win.filter_kind.setCurrentIndex(win.filter_kind.findData(""))
+    assert len(win._history_cards) == 2
+    # "B" is a fresh card built when the filter changed -- never touched by select-all above.
+    b_card = next(c for c in win._history_cards if c.entry["title"] == "B")
+    assert b_card.checkbox.isChecked() is False
+
+    win._set_all_history_checked(False)
+    assert all(not c.checkbox.isChecked() for c in win._history_cards)
 
 
 def test_convert_targets_cover_the_expected_formats():

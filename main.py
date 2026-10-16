@@ -44,13 +44,21 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSlider,
+    QSpinBox,
     QTextEdit,
     QVBoxLayout,
     QWidget,
 )
 
 from i18n import LANGUAGES, get_language, set_language, tr
-from logger import get_logger, setup_logging
+from logger import (
+    DEFAULT_LOG_BACKUP_COUNT,
+    DEFAULT_LOG_MAX_MB,
+    LOG_FILE,
+    apply_log_rotation_settings,
+    get_logger,
+    setup_logging,
+)
 from theme import TOKENS, icon, stylesheet
 
 log = get_logger(__name__)
@@ -769,10 +777,12 @@ class PlaylistDialog(QDialog):
 
 
 class SettingsDialog(QDialog):
-    def __init__(self, yandex_token: str, dest: str, language: str, parent=None):
+    def __init__(
+        self, yandex_token: str, dest: str, language: str, log_max_mb: int, log_backup_count: int, parent=None
+    ):
         super().__init__(parent)
         self.setWindowTitle(tr("dialog.settings_title"))
-        self.resize(460, 220)
+        self.resize(460, 300)
 
         layout = QVBoxLayout(self)
 
@@ -798,6 +808,23 @@ class SettingsDialog(QDialog):
         self.token_edit.setPlaceholderText(tr("settings.yandex_token_placeholder"))
         layout.addWidget(self.token_edit)
 
+        layout.addWidget(QLabel(tr("settings.log_rotation_label")))
+        log_row = QHBoxLayout()
+        self.log_max_mb_spin = QSpinBox()
+        self.log_max_mb_spin.setRange(1, 500)
+        self.log_max_mb_spin.setSuffix(" MB")
+        self.log_max_mb_spin.setValue(log_max_mb)
+        self.log_backup_count_spin = QSpinBox()
+        self.log_backup_count_spin.setRange(0, 50)
+        self.log_backup_count_spin.setValue(log_backup_count)
+        log_row.addWidget(self.log_max_mb_spin)
+        log_row.addWidget(self.log_backup_count_spin)
+        open_log_btn = QPushButton(tr("button.open_log_file"))
+        open_log_btn.setObjectName("secondary")
+        open_log_btn.clicked.connect(lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(LOG_FILE))))
+        log_row.addWidget(open_log_btn)
+        layout.addLayout(log_row)
+
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
@@ -816,6 +843,12 @@ class SettingsDialog(QDialog):
 
     def language(self) -> str:
         return self.language_combo.currentData()
+
+    def log_max_mb(self) -> int:
+        return self.log_max_mb_spin.value()
+
+    def log_backup_count(self) -> int:
+        return self.log_backup_count_spin.value()
 
 
 class HistoryCard(QWidget):
@@ -1173,6 +1206,17 @@ class MainWindow(QMainWindow):
         self.history_title.setObjectName("heading")
         history_header.addWidget(self.history_title)
         history_header.addStretch()
+        # Select/clear act on whatever's currently rendered under the active
+        # search/filters, not the whole history -- picking "missing" status
+        # then "select all" is exactly the bulk-cleanup use case this is for.
+        self.select_all_btn = QPushButton()
+        self.select_all_btn.setObjectName("secondary")
+        self.select_all_btn.clicked.connect(lambda: self._set_all_history_checked(True))
+        history_header.addWidget(self.select_all_btn)
+        self.select_none_btn = QPushButton()
+        self.select_none_btn.setObjectName("secondary")
+        self.select_none_btn.clicked.connect(lambda: self._set_all_history_checked(False))
+        history_header.addWidget(self.select_none_btn)
         self.delete_history_btn = QPushButton()
         self.delete_history_btn.setObjectName("secondary")
         self.delete_history_btn.clicked.connect(self._delete_selected_history)
@@ -1320,13 +1364,21 @@ class MainWindow(QMainWindow):
     def _open_settings(self) -> None:
         dest = self.state.get("last_dest", DEFAULT_DEST)
         language = self.state.get("language", get_language())
-        dlg = SettingsDialog(self.state.get("yandex_token", ""), dest, language, self)
+        log_max_mb = self.state.get("log_max_mb", DEFAULT_LOG_MAX_MB)
+        log_backup_count = self.state.get("log_backup_count", DEFAULT_LOG_BACKUP_COUNT)
+        dlg = SettingsDialog(self.state.get("yandex_token", ""), dest, language, log_max_mb, log_backup_count, self)
         if dlg.exec() == QDialog.Accepted:
             self.state["yandex_token"] = dlg.token()
             self.state["last_dest"] = dlg.dest()
             language_changed = dlg.language() != language
             self.state["language"] = dlg.language()
+            self.state["log_max_mb"] = dlg.log_max_mb()
+            self.state["log_backup_count"] = dlg.log_backup_count()
             save_state(self.state)
+            apply_log_rotation_settings(dlg.log_max_mb(), dlg.log_backup_count())
+            log.info("settings.saved", dest=dlg.dest(), language=dlg.language(),
+                      log_max_mb=dlg.log_max_mb(), log_backup_count=dlg.log_backup_count(),
+                      yandex_token_set=bool(dlg.token()))
             if language_changed:
                 set_language(dlg.language())
                 self._retranslate_ui()
@@ -1346,6 +1398,7 @@ class MainWindow(QMainWindow):
         self.theme = self.theme_combo.currentData()
         self.state["theme"] = self.theme
         save_state(self.state)
+        log.info("ui.theme_changed", theme=self.theme)
         self._apply_theme()
         self._render_history()
 
@@ -1365,6 +1418,8 @@ class MainWindow(QMainWindow):
         self.video_collapse_btn.setIcon(icon("chevron-right" if self._video_collapsed else "chevron-down", t["icon"]))
         self.settings_btn.setIcon(icon("settings", t["icon"]))
         self.delete_history_btn.setIcon(icon("trash", t["icon"]))
+        self.select_all_btn.setIcon(icon("check", t["icon"]))
+        self.select_none_btn.setIcon(icon("x", t["icon"]))
         self.download_btn.setIcon(icon("download", t["accent_text"]))
         self.overlay.setStyleSheet(
             f"background-color: {('rgba(10, 10, 15, 200)' if self._effective_theme == 'dark' else 'rgba(255, 255, 255, 215)')};"
@@ -1384,6 +1439,8 @@ class MainWindow(QMainWindow):
         self.info_save_btn.setText(tr("button.save_as"))
         self.history_title.setText(tr("heading.history"))
         self.delete_history_btn.setText(tr("button.delete_selected"))
+        self.select_all_btn.setText(tr("button.select_all_filtered"))
+        self.select_none_btn.setText(tr("button.select_none_filtered"))
         self.history_search.setPlaceholderText(tr("search.history_placeholder"))
         self.filter_source_label.setText(tr("filter.source_label"))
         self.filter_format_label.setText(tr("filter.format_label"))
@@ -1773,6 +1830,10 @@ class MainWindow(QMainWindow):
             insert_at += 1
             self._history_cards.append(card)
 
+    def _set_all_history_checked(self, checked: bool) -> None:
+        for card in self._history_cards:
+            card.checkbox.setChecked(checked)
+
     def _delete_selected_history(self) -> None:
         selected = [c for c in self._history_cards if c.checkbox.isChecked()]
         if not selected:
@@ -1808,7 +1869,11 @@ class MainWindow(QMainWindow):
 
 
 def main() -> None:
-    setup_logging()
+    state = load_state()
+    setup_logging(
+        max_mb=state.get("log_max_mb", DEFAULT_LOG_MAX_MB),
+        backup_count=state.get("log_backup_count", DEFAULT_LOG_BACKUP_COUNT),
+    )
     log.info("app.start")
     app = QApplication(sys.argv)
     window = MainWindow()
