@@ -47,6 +47,7 @@ from PySide6.QtWidgets import (
 )
 
 from logger import get_logger, setup_logging
+from theme import TOKENS, icon, stylesheet
 
 log = get_logger(__name__)
 
@@ -468,44 +469,33 @@ class SettingsDialog(QDialog):
         return self.token_edit.text().strip()
 
 
-STYLE = """
-QMainWindow, QWidget { background-color: #15161d; color: #e6e6f0; font-size: 13px; }
-QLineEdit, QComboBox, QTreeWidget {
-    background-color: #1f2129; border: 1px solid #30323d; border-radius: 8px;
-    padding: 6px 10px; color: #e6e6f0;
-}
-QPushButton {
-    background-color: #6c5ce7; border: none; border-radius: 8px;
-    padding: 8px 16px; font-weight: 600; color: white;
-}
-QPushButton:hover { background-color: #7d6ff0; }
-QPushButton:disabled { background-color: #3a3b45; color: #8a8a95; }
-QPushButton#secondary { background-color: #2a2c36; color: #cfcfe0; }
-QPushButton#secondary:hover { background-color: #343642; }
-QProgressBar {
-    background-color: #1f2129; border: none; border-radius: 6px; height: 10px; text-align: center;
-}
-QProgressBar::chunk { background-color: #6c5ce7; border-radius: 6px; }
-QLabel#status_ok { color: #5ee6a3; }
-QLabel#status_err { color: #ff6b6b; }
-QLabel#status_busy { color: #ffd166; }
-QTreeWidget::item { padding: 4px; }
-"""
-
-
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("media-grabber")
-        self.resize(760, 640)
+        self.resize(820, 700)
         self.state = load_state()
         self.worker: DownloadWorker | None = None
+        self.theme = self.state.get("theme", "dark")
 
         root = QWidget()
         self.setCentralWidget(root)
         layout = QVBoxLayout(root)
-        layout.setSpacing(10)
-        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(12)
+        layout.setContentsMargins(18, 16, 18, 16)
+
+        # Header: title + theme switch
+        header = QHBoxLayout()
+        title_label = QLabel("media-grabber")
+        title_label.setObjectName("heading")
+        header.addWidget(title_label)
+        header.addStretch()
+        self.theme_btn = QPushButton()
+        self.theme_btn.setObjectName("iconBtn")
+        self.theme_btn.setToolTip("Светлая / тёмная тема")
+        self.theme_btn.clicked.connect(self._toggle_theme)
+        header.addWidget(self.theme_btn)
+        layout.addLayout(header)
 
         # URL + format row
         row1 = QHBoxLayout()
@@ -519,9 +509,8 @@ class MainWindow(QMainWindow):
         self.url_edit.textChanged.connect(self._on_url_changed)
         self.quality_combo = QComboBox()
         self.quality_combo.addItems(QUALITIES.keys())
-        self.open_browser_btn = QPushButton("🌐")
-        self.open_browser_btn.setObjectName("secondary")
-        self.open_browser_btn.setFixedWidth(40)
+        self.open_browser_btn = QPushButton()
+        self.open_browser_btn.setObjectName("iconBtn")
         self.open_browser_btn.setToolTip("Открыть ссылку в браузере")
         self.open_browser_btn.clicked.connect(self._open_current_url)
         row1.addWidget(self.url_edit, 3)
@@ -536,7 +525,7 @@ class MainWindow(QMainWindow):
         self.browse_btn = QPushButton("Папка…")
         self.browse_btn.setObjectName("secondary")
         self.browse_btn.clicked.connect(self._pick_dest)
-        self.settings_btn = QPushButton("⚙ Настройки")
+        self.settings_btn = QPushButton("Настройки")
         self.settings_btn.setObjectName("secondary")
         self.settings_btn.clicked.connect(self._open_settings)
         row2.addWidget(self.dest_edit, 3)
@@ -559,6 +548,7 @@ class MainWindow(QMainWindow):
 
         # Preview player
         self.video_widget = QVideoWidget()
+        self.video_widget.setObjectName("card")
         self.video_widget.setMinimumHeight(260)
         self.video_widget.hide()
         layout.addWidget(self.video_widget)
@@ -569,13 +559,13 @@ class MainWindow(QMainWindow):
         self.player.setVideoOutput(self.video_widget)
 
         controls = QHBoxLayout()
-        self.play_btn = QPushButton("▶")
-        self.play_btn.setObjectName("secondary")
-        self.play_btn.setFixedWidth(44)
+        self.play_btn = QPushButton()
+        self.play_btn.setObjectName("iconBtn")
         self.play_btn.clicked.connect(self._toggle_play)
         self.seek_slider = QSlider(Qt.Horizontal)
         self.seek_slider.sliderMoved.connect(self.player.setPosition)
         self.now_playing_label = QLabel("")
+        self.now_playing_label.setObjectName("dim")
         controls.addWidget(self.play_btn)
         controls.addWidget(self.seek_slider, 3)
         layout.addLayout(controls)
@@ -587,7 +577,9 @@ class MainWindow(QMainWindow):
 
         # History
         history_header = QHBoxLayout()
-        history_header.addWidget(QLabel("История"))
+        history_title = QLabel("История")
+        history_title.setObjectName("heading")
+        history_header.addWidget(history_title)
         history_header.addStretch()
         self.delete_history_btn = QPushButton("Удалить выбранное")
         self.delete_history_btn.setObjectName("secondary")
@@ -603,15 +595,16 @@ class MainWindow(QMainWindow):
 
         # Overlay shown during a download, blocking input controls
         self.overlay = QWidget(root)
-        self.overlay.setStyleSheet("background-color: rgba(10, 10, 15, 190);")
         overlay_layout = QVBoxLayout(self.overlay)
         self.overlay_label = QLabel("Скачивание…")
         self.overlay_label.setAlignment(Qt.AlignCenter)
-        self.overlay_label.setStyleSheet("color: #e6e6f0; font-size: 18px; font-weight: 600; background: transparent;")
+        self.overlay_label.setStyleSheet("font-size: 18px; font-weight: 700; background: transparent;")
         overlay_layout.addStretch()
         overlay_layout.addWidget(self.overlay_label)
         overlay_layout.addStretch()
         self.overlay.hide()
+
+        self._apply_theme()
 
         self._inputs = [
             self.url_edit,
@@ -656,6 +649,28 @@ class MainWindow(QMainWindow):
         url = self.url_edit.text().strip()
         if url:
             QDesktopServices.openUrl(QUrl(url))
+
+    def _toggle_theme(self) -> None:
+        self.theme = "light" if self.theme == "dark" else "dark"
+        self.state["theme"] = self.theme
+        save_state(self.state)
+        self._apply_theme()
+        self._render_history()
+
+    def _apply_theme(self) -> None:
+        t = TOKENS[self.theme]
+        QApplication.instance().setStyleSheet(stylesheet(self.theme))
+        self.theme_btn.setIcon(icon("sun" if self.theme == "dark" else "moon", t["icon"]))
+        self.open_browser_btn.setIcon(icon("globe", t["icon"]))
+        self.play_btn.setIcon(icon("pause" if self._is_playing() else "play", t["icon"]))
+        self.browse_btn.setIcon(icon("folder", t["icon"]))
+        self.settings_btn.setIcon(icon("settings", t["icon"]))
+        self.delete_history_btn.setIcon(icon("trash", t["icon"]))
+        self.download_btn.setIcon(icon("download", t["accent_text"]))
+        self.overlay.setStyleSheet(f"background-color: {('rgba(10, 10, 15, 200)' if self.theme == 'dark' else 'rgba(255, 255, 255, 215)')};")
+
+    def _is_playing(self) -> bool:
+        return self.player.playbackState() == QMediaPlayer.PlayingState
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
@@ -854,7 +869,8 @@ class MainWindow(QMainWindow):
             self.player.play()
 
     def _on_playback_state(self, state: QMediaPlayer.PlaybackState) -> None:
-        self.play_btn.setText("⏸" if state == QMediaPlayer.PlayingState else "▶")
+        name = "pause" if state == QMediaPlayer.PlayingState else "play"
+        self.play_btn.setIcon(icon(name, TOKENS[self.theme]["icon"]))
 
     def _on_position(self, pos: int) -> None:
         if not self.seek_slider.isSliderDown():
@@ -867,20 +883,27 @@ class MainWindow(QMainWindow):
         self._render_history()
 
     def _render_history(self) -> None:
+        t = TOKENS[self.theme]
         self.history_tree.clear()
         for idx, entry in enumerate(self.state.get("history", [])):
-            icon = "🎬" if entry.get("kind") == "video" else "🎵"
+            kind_word = "видео" if entry.get("kind") == "video" else "аудио"
             on_disk = entry.get("status") == "ok" and Path(entry.get("path", "")).exists()
             missing = entry.get("status") == "ok" and not on_disk
-            mark = "✅" if on_disk else ("🗑" if missing else "⚠️")
+            if on_disk:
+                status_icon, status_color = "check", t["success"]
+            elif missing:
+                status_icon, status_color = "trash", t["text_dim"]
+            else:
+                status_icon, status_color = "alert", t["danger"]
 
-            top = QTreeWidgetItem([f"{mark} {icon} {entry['title']}  —  {entry['ts']}"])
+            top = QTreeWidgetItem([f"{entry['title']}  —  {kind_word}  —  {entry['ts']}"])
+            top.setIcon(0, icon(status_icon, status_color))
             top.setData(0, Qt.UserRole, idx)
             self.history_tree.addTopLevelItem(top)
             if missing:
                 # file gone from disk: grey it out (no play button below), but keep it
                 # selectable so it can still be picked and removed from the list
-                top.setForeground(0, QColor("#6e6e7a"))
+                top.setForeground(0, QColor(t["text_dim"]))
 
             detail_lines = [f"URL: {entry['url']}", f"Формат: {entry.get('container', '?')}", f"Источник: {entry.get('site', '?')}"]
             if entry.get("status") == "ok":
@@ -899,12 +922,14 @@ class MainWindow(QMainWindow):
             actions_layout = QHBoxLayout(actions_row)
             actions_layout.setContentsMargins(0, 0, 0, 0)
             if on_disk:
-                play_btn = QPushButton("▶ Открыть в плеере")
+                play_btn = QPushButton(" Открыть в плеере")
                 play_btn.setObjectName("secondary")
+                play_btn.setIcon(icon("play", t["icon"]))
                 path, kind, title = entry["path"], entry["kind"], entry["title"]
                 play_btn.clicked.connect(lambda _=None, p=path, k=kind, t=title: self._load_into_player(p, k, t))
                 actions_layout.addWidget(play_btn)
-            link_btn = QPushButton("🌐 Открыть ссылку")
+            link_btn = QPushButton(" Открыть ссылку")
+            link_btn.setIcon(icon("globe", t["icon"]))
             link_btn.setObjectName("secondary")
             entry_url = entry["url"]
             link_btn.clicked.connect(lambda _=None, u=entry_url: QDesktopServices.openUrl(QUrl(u)))
@@ -950,7 +975,6 @@ def main() -> None:
     setup_logging()
     log.info("app.start")
     app = QApplication(sys.argv)
-    app.setStyleSheet(STYLE)
     window = MainWindow()
     window.show()
     sys.exit(app.exec())

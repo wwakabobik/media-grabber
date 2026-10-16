@@ -10,6 +10,20 @@ A small desktop app: paste a YouTube / Vimeo / SoundCloud / VK / Spotify / Yande
 (including a playlist or album), pick a format and quality, hit download, and watch or listen
 right in the window — no browser, no external player.
 
+<p align="center">
+  <img src="docs/screenshot-dark.png" alt="media-grabber, dark theme" width="48%">
+  <img src="docs/screenshot-light.png" alt="media-grabber, light theme" width="48%">
+</p>
+
+## Design
+
+A minimalist glass look (translucent cards, soft gradients, rounded corners, one consistent
+button style) with full light/dark themes, switchable from the header and persisted between
+runs. Icons are small hand-drawn lucide-style SVGs tinted per theme at render time — no icon
+font, no asset files. QSS can't do the OS's real frosted-glass blur (that needs native
+`NSVisualEffectView`, out of scope for a Qt app — see Known limitations), so this fakes the
+vibe with translucency and soft borders instead.
+
 ## How it gets the media
 
 - **YouTube / Vimeo / SoundCloud / VK** (and anything [yt-dlp](https://github.com/yt-dlp/yt-dlp)
@@ -70,6 +84,8 @@ hit an error.
   flow like Spotify's) — without one, Yandex links fail with a clear "add a token" error.
 - SoundCloud's *original* (highest-quality) format needs login too; without it yt-dlp falls back
   to the standard transcoded stream, which works fine but isn't the uploader's original file.
+- The "glass" look is QSS translucency + soft borders, not real compositor blur — Qt widgets
+  can't get native macOS vibrancy without a lot more platform-specific plumbing.
 
 ## Quickstart
 
@@ -97,9 +113,11 @@ The result is in `dist/MediaGrabber.app` — copy it to `/Applications` to insta
 ## Tech stack
 
 - **UI**: [PySide6](https://doc.qt.io/qtforpython/) (Qt for Python), incl. Qt Multimedia for the
-  in-app player
+  in-app player and Qt SVG for the icon set (`theme.py` — color tokens, QSS, icon rendering)
 - **Download backends**: [yt-dlp](https://github.com/yt-dlp/yt-dlp),
-  [spotdl](https://github.com/spotDL/spotify-downloader)
+  [spotdl](https://github.com/spotDL/spotify-downloader),
+  [yandex-music](https://github.com/MarshalX/yandex-music-api)
+- **Logging**: [structlog](https://www.structlog.org/) (`logger.py`)
 - **Packaging**: [uv](https://docs.astral.sh/uv/) for dependency management,
   [PyInstaller](https://pyinstaller.org/) for the `.app` bundle
 - **Python**: 3.12+
