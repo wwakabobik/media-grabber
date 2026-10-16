@@ -12,15 +12,17 @@ from __future__ import annotations
 import json
 import os
 import re
+import subprocess
 import sys
+import urllib.request
 from datetime import datetime
 from pathlib import Path
 
 os.environ.setdefault("QT_MAC_WANTS_LAYER", "1")  # frozen/signed .app: video widget renders black without this
 
 import yt_dlp
-from PySide6.QtCore import Qt, QThread, QUrl, Signal
-from PySide6.QtGui import QColor, QDesktopServices
+from PySide6.QtCore import Qt, QThread, QTimer, QUrl, Signal
+from PySide6.QtGui import QColor, QDesktopServices, QPixmap
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
@@ -104,6 +106,57 @@ def _get_spotdl_client(output_template: str):
     else:
         _spotdl_client.downloader.settings["output"] = output_template
     return _spotdl_client
+
+
+def read_media_info(path: str) -> dict:
+    """Best-effort read of duration + embedded cover art from an already-downloaded file,
+    for display in the history list. Never raises -- returns whatever it could get."""
+    info: dict = {}
+    try:
+        from mutagen import File as MutagenFile
+
+        probe = MutagenFile(path)
+        if probe and probe.info and getattr(probe.info, "length", None):
+            info["duration"] = probe.info.length
+    except Exception as e:  # noqa: BLE001 -- metadata is a nice-to-have, never fatal
+        log.debug("media_info.duration_failed", path=path, error=str(e))
+
+    try:
+        ext = Path(path).suffix.lower()
+        cover_bytes = None
+        if ext == ".mp3":
+            from mutagen.id3 import ID3
+
+            apics = ID3(path).getall("APIC")
+            if apics:
+                cover_bytes = apics[0].data
+        elif ext in (".mp4", ".m4a"):
+            from mutagen.mp4 import MP4
+
+            covers = MP4(path).get("covr")
+            if covers:
+                cover_bytes = bytes(covers[0])
+        if cover_bytes:
+            info["cover"] = cover_bytes
+    except Exception as e:  # noqa: BLE001 -- same as above
+        log.debug("media_info.cover_failed", path=path, error=str(e))
+    return info
+
+
+def format_duration(seconds: float | None) -> str:
+    if not seconds:
+        return "?"
+    seconds = int(seconds)
+    h, rem = divmod(seconds, 3600)
+    m, s = divmod(rem, 60)
+    return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
+
+
+def reveal_in_finder(path: str) -> None:
+    if sys.platform == "darwin":
+        subprocess.run(["open", "-R", path], check=False)
+    else:
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(Path(path).parent)))
 
 
 def resolve_playlist(url: str, yandex_token: str) -> tuple[str, list[tuple[str, str]]] | None:
@@ -403,6 +456,69 @@ class ResolveWorker(QThread):
             self.failed.emit(str(e))
 
 
+class PreviewWorker(QThread):
+    """Fetches just enough (title/duration/cover) to show a live preview before the
+    real download starts -- no download, no playlist expansion, best-effort only."""
+
+    ready = Signal(dict)
+    failed = Signal(str)
+
+    def __init__(self, url: str, yandex_token: str):
+        super().__init__()
+        self.url = url
+        self.yandex_token = yandex_token
+
+    @staticmethod
+    def _download_bytes(url: str) -> bytes | None:
+        try:
+            with urllib.request.urlopen(url, timeout=8) as r:
+                return r.read()
+        except Exception as e:  # noqa: BLE001 -- a missing thumbnail is not a failure
+            log.debug("preview.thumbnail_failed", url=url, error=str(e))
+            return None
+
+    def run(self) -> None:
+        try:
+            self.ready.emit(self._fetch())
+        except Exception as e:  # noqa: BLE001 -- surfaced as "no preview", not fatal
+            self.failed.emit(str(e))
+
+    def _fetch(self) -> dict:
+        if is_spotify(self.url):
+            client = _get_spotdl_client("{artists} - {title}.{output-ext}")
+            songs = client.search([self.url])
+            if not songs:
+                raise RuntimeError("Spotify: ничего не найдено")
+            song = songs[0]
+            cover = self._download_bytes(song.cover_url) if song.cover_url else None
+            return {"title": song.display_name, "duration": song.duration, "cover": cover}
+
+        if is_yandex_music(self.url):
+            if not self.yandex_token:
+                raise RuntimeError("нужен токен")
+            m = YANDEX_TRACK_RE.search(self.url)
+            if not m:
+                raise RuntimeError("не похоже на трек")
+            from yandex_music import Client
+
+            client = Client(self.yandex_token).init()
+            track = client.tracks([m.group(2)])[0]
+            try:
+                cover = track.download_cover_bytes(size="200x200")
+            except Exception as e:  # noqa: BLE001 -- cover is optional
+                log.debug("preview.yandex_cover_failed", error=str(e))
+                cover = None
+            duration = track.duration_ms / 1000 if getattr(track, "duration_ms", None) else None
+            return {"title": _yandex_track_title(track), "duration": duration, "cover": cover}
+
+        # Generic yt-dlp sources (YouTube, Vimeo, SoundCloud, VK, ...)
+        with yt_dlp.YoutubeDL({"skip_download": True, "quiet": True, "noplaylist": True}) as ydl:
+            info = ydl.extract_info(self.url, download=False)
+        thumb = info.get("thumbnail")
+        cover = self._download_bytes(thumb) if thumb else None
+        return {"title": info.get("title"), "duration": info.get("duration"), "cover": cover}
+
+
 class PlaylistDialog(QDialog):
     def __init__(self, name: str, items: list[tuple[str, str]], parent=None):
         super().__init__(parent)
@@ -519,6 +635,32 @@ class MainWindow(QMainWindow):
         row1.addWidget(self.open_browser_btn)
         layout.addLayout(row1)
 
+        # Live preview card: title/duration/cover, fetched shortly after the URL
+        # settles -- lets you see *what* you're about to download before committing.
+        self.preview_card = QWidget()
+        self.preview_card.setObjectName("card")
+        preview_layout = QHBoxLayout(self.preview_card)
+        self.preview_cover = QLabel()
+        self.preview_cover.setFixedSize(48, 48)
+        preview_layout.addWidget(self.preview_cover)
+        preview_text_box = QVBoxLayout()
+        self.preview_title = QLabel()
+        self.preview_title.setObjectName("heading")
+        self.preview_title.setWordWrap(True)
+        self.preview_duration = QLabel()
+        self.preview_duration.setObjectName("dim")
+        preview_text_box.addWidget(self.preview_title)
+        preview_text_box.addWidget(self.preview_duration)
+        preview_layout.addLayout(preview_text_box, 1)
+        self.preview_card.hide()
+        layout.addWidget(self.preview_card)
+
+        self._preview_timer = QTimer(self)
+        self._preview_timer.setSingleShot(True)
+        self._preview_timer.timeout.connect(self._start_preview)
+        self._preview_worker: PreviewWorker | None = None
+        self._preview_generation = 0
+
         # Destination row
         row2 = QHBoxLayout()
         self.dest_edit = QLineEdit(self.state.get("last_dest", DEFAULT_DEST))
@@ -587,6 +729,12 @@ class MainWindow(QMainWindow):
         history_header.addWidget(self.delete_history_btn)
         layout.addLayout(history_header)
 
+        self._history_filter = ""
+        self.history_search = QLineEdit()
+        self.history_search.setPlaceholderText("Поиск по истории — название, ссылка, источник…")
+        self.history_search.textChanged.connect(self._on_history_search)
+        layout.addWidget(self.history_search)
+
         self.history_tree = QTreeWidget()
         self.history_tree.setHeaderHidden(True)
         self.history_tree.setSelectionMode(QAbstractItemView.ExtendedSelection)
@@ -638,6 +786,39 @@ class MainWindow(QMainWindow):
         if audio_only and FORMATS[self.format_combo.currentText()][0] == "video":
             audio_key = next(k for k, (kind, _) in FORMATS.items() if kind == "audio")
             self.format_combo.setCurrentText(audio_key)
+
+        # Debounced live preview: wait for typing/pasting to settle before fetching.
+        self._preview_generation += 1
+        self.preview_card.hide()
+        self._preview_timer.stop()
+        if "http" in text:
+            self._preview_timer.start(700)
+
+    def _start_preview(self) -> None:
+        url = self.url_edit.text().strip()
+        if "http" not in url:
+            return
+        generation = self._preview_generation
+        self._preview_worker = PreviewWorker(url, self.state.get("yandex_token", ""))
+        self._preview_worker.ready.connect(lambda info: self._on_preview_ready(info, generation))
+        self._preview_worker.failed.connect(lambda _msg, g=generation: None)  # stale/failed: just stay hidden
+        self._preview_worker.start()
+
+    def _on_preview_ready(self, info: dict, generation: int) -> None:
+        if generation != self._preview_generation:
+            return  # URL changed again while this was in flight
+        self.preview_title.setText(info.get("title") or "?")
+        self.preview_duration.setText(format_duration(info.get("duration")))
+        cover = info.get("cover")
+        if cover:
+            pix = QPixmap()
+            pix.loadFromData(cover)
+            self.preview_cover.setPixmap(
+                pix.scaled(48, 48, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
+            )
+        else:
+            self.preview_cover.clear()
+        self.preview_card.show()
 
     def _open_settings(self) -> None:
         dlg = SettingsDialog(self.state.get("yandex_token", ""), self)
@@ -877,6 +1058,10 @@ class MainWindow(QMainWindow):
             self.seek_slider.setValue(pos)
 
     # -- history ---------------------------------------------------------
+    def _on_history_search(self, text: str) -> None:
+        self._history_filter = text.strip()
+        self._render_history()
+
     def _add_history(self, entry: dict) -> None:
         self.state.setdefault("history", []).insert(0, entry)
         save_state(self.state)
@@ -885,7 +1070,14 @@ class MainWindow(QMainWindow):
     def _render_history(self) -> None:
         t = TOKENS[self.theme]
         self.history_tree.clear()
+        query = self._history_filter.lower() if hasattr(self, "_history_filter") else ""
         for idx, entry in enumerate(self.state.get("history", [])):
+            haystack = " ".join(
+                str(entry.get(k, "")) for k in ("title", "url", "site", "container", "kind")
+            ).lower()
+            if query and query not in haystack:
+                continue
+
             kind_word = "видео" if entry.get("kind") == "video" else "аудио"
             on_disk = entry.get("status") == "ok" and Path(entry.get("path", "")).exists()
             missing = entry.get("status") == "ok" and not on_disk
@@ -896,6 +1088,8 @@ class MainWindow(QMainWindow):
             else:
                 status_icon, status_color = "alert", t["danger"]
 
+            media = read_media_info(entry["path"]) if on_disk else {}
+
             top = QTreeWidgetItem([f"{entry['title']}  —  {kind_word}  —  {entry['ts']}"])
             top.setIcon(0, icon(status_icon, status_color))
             top.setData(0, Qt.UserRole, idx)
@@ -905,15 +1099,47 @@ class MainWindow(QMainWindow):
                 # selectable so it can still be picked and removed from the list
                 top.setForeground(0, QColor(t["text_dim"]))
 
-            detail_lines = [f"URL: {entry['url']}", f"Формат: {entry.get('container', '?')}", f"Источник: {entry.get('site', '?')}"]
+            detail_lines = [
+                f"Скачано: {entry['ts']}",
+                f"URL: {entry['url']}",
+                f"Формат: {entry.get('container', '?')}",
+                f"Источник: {entry.get('site', '?')}",
+            ]
             if entry.get("status") == "ok":
+                if "duration" in media:
+                    detail_lines.append(f"Длительность: {format_duration(media['duration'])}")
                 detail_lines.append(f"Файл: {entry.get('path', '?')}")
                 if missing:
                     detail_lines.append("(файл удалён с диска)")
             else:
                 detail_lines.append(f"Ошибка: {entry.get('error', '?')}")
-            child = QTreeWidgetItem(["\n".join(detail_lines)])
-            top.addChild(child)
+
+            # Detail row: a real widget (cover + wrapping text), not a raw multi-line
+            # text item -- QTreeWidgetItem doesn't size itself to wrapped text, which
+            # was clipping the path/buttons underneath it.
+            detail_child = QTreeWidgetItem([""])
+            top.addChild(detail_child)
+            detail_row = QWidget()
+            detail_layout = QHBoxLayout(detail_row)
+            detail_layout.setContentsMargins(0, 2, 0, 2)
+            cover = media.get("cover")
+            if cover:
+                pix = QPixmap()
+                pix.loadFromData(cover)
+                cover_label = QLabel()
+                cover_label.setPixmap(
+                    pix.scaled(56, 56, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
+                )
+                cover_label.setFixedSize(56, 56)
+                cover_label.setStyleSheet("border-radius: 8px;")
+                detail_layout.addWidget(cover_label)
+            text_label = QLabel("\n".join(detail_lines))
+            text_label.setObjectName("dim")
+            text_label.setWordWrap(True)
+            text_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            detail_layout.addWidget(text_label, 1)
+            self.history_tree.setItemWidget(detail_child, 0, detail_row)
+            top.addChild(QTreeWidgetItem([""]))  # spacer so the actions row below isn't cramped
             top.setExpanded(False)
 
             actions_child = QTreeWidgetItem([""])
@@ -928,6 +1154,12 @@ class MainWindow(QMainWindow):
                 path, kind, title = entry["path"], entry["kind"], entry["title"]
                 play_btn.clicked.connect(lambda _=None, p=path, k=kind, t=title: self._load_into_player(p, k, t))
                 actions_layout.addWidget(play_btn)
+
+                finder_btn = QPushButton(" Показать в Finder")
+                finder_btn.setObjectName("secondary")
+                finder_btn.setIcon(icon("folder", t["icon"]))
+                finder_btn.clicked.connect(lambda _=None, p=path: reveal_in_finder(p))
+                actions_layout.addWidget(finder_btn)
             link_btn = QPushButton(" Открыть ссылку")
             link_btn.setIcon(icon("globe", t["icon"]))
             link_btn.setObjectName("secondary")
