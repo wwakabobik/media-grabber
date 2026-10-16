@@ -536,21 +536,24 @@ def test_entry_disk_status(tmp_path):
     assert entry_disk_status({"status": "error"}) == "error"
 
 
-def test_main_window_theme_combo_has_three_options_and_picks_up_saved_choice(qtbot):
+def test_main_window_theme_button_cycles_through_light_dark_system(qtbot):
     win = MainWindow()
     qtbot.addWidget(win)
-    assert [win.theme_combo.itemData(i) for i in range(win.theme_combo.count())] == ["light", "dark", "system"]
-    win.theme = "dark"
-    win.state["theme"] = "dark"
+    win.theme = "light"
+    win._on_theme_changed()
+    assert win.theme == "dark"
+    win._on_theme_changed()
+    assert win.theme == "system"
+    win._on_theme_changed()
+    assert win.theme == "light"
 
 
 def test_main_window_on_theme_changed_persists_and_applies(qtbot):
     win = MainWindow()
     qtbot.addWidget(win)
+    win.theme = "light"  # known baseline
     with patch("main.save_state") as mocked_save:
-        win.theme_combo.setCurrentIndex(win.theme_combo.findData("light"))  # known baseline
-        mocked_save.reset_mock()
-        win.theme_combo.setCurrentIndex(win.theme_combo.findData("dark"))
+        win._on_theme_changed()
         assert win.theme == "dark"
         assert win._effective_theme == "dark"
         mocked_save.assert_called_once_with(win.state)

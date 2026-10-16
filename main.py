@@ -1070,16 +1070,16 @@ class MainWindow(QMainWindow):
         title_label.setObjectName("heading")
         header.addWidget(title_label)
         header.addStretch()
-        # Icon-only, not text -- each item's icon is its theme's own icon
-        # (sun/moon/monitor), re-tinted in _apply_theme() like every other
-        # icon here so it stays legible against the current background.
-        self.theme_combo = QComboBox()
-        self.theme_combo.setFixedWidth(52)
-        for key in THEME_OPTIONS:
-            self.theme_combo.addItem("", key)
-        self.theme_combo.setCurrentIndex(self.theme_combo.findData(self.theme))
-        self.theme_combo.currentIndexChanged.connect(self._on_theme_changed)
-        header.addWidget(self.theme_combo)
+        # Icon-only, cycling through light -> dark -> system on each click --
+        # tried a QComboBox with blank-text icon items first, but its built-in
+        # padding + dropdown-arrow space clipped the icon badly at any
+        # reasonable width (confirmed via a real screenshot). A plain button
+        # matches every other icon-only control here (settings, video/history
+        # collapse) and needs no special-casing.
+        self.theme_btn = QPushButton()
+        self.theme_btn.setObjectName("iconBtn")
+        self.theme_btn.clicked.connect(self._on_theme_changed)
+        header.addWidget(self.theme_btn)
         self.settings_btn = QPushButton()
         self.settings_btn.setObjectName("iconBtn")
         self.settings_btn.clicked.connect(self._open_settings)
@@ -1448,12 +1448,12 @@ class MainWindow(QMainWindow):
         scheme = QApplication.instance().styleHints().colorScheme()
         return "light" if scheme == Qt.ColorScheme.Light else "dark"
 
-    def _on_theme_changed(self, _index: int) -> None:
-        self.theme = self.theme_combo.currentData()
+    def _on_theme_changed(self) -> None:
+        self.theme = THEME_OPTIONS[(THEME_OPTIONS.index(self.theme) + 1) % len(THEME_OPTIONS)]
         self.state["theme"] = self.theme
         save_state(self.state)
         log.info("ui.theme_changed", theme=self.theme)
-        self.theme_combo.setToolTip(tr(f"theme.{self.theme}"))
+        self.theme_btn.setToolTip(tr(f"theme.{self.theme}"))
         self._apply_theme()
         self._render_history()
 
@@ -1479,16 +1479,13 @@ class MainWindow(QMainWindow):
         self.select_all_btn.setIcon(icon("check", t["icon"]))
         self.select_none_btn.setIcon(icon("x", t["icon"]))
         self.download_btn.setIcon(icon("download", t["accent_text"]))
-        for key in THEME_OPTIONS:
-            self.theme_combo.setItemIcon(self.theme_combo.findData(key), icon(THEME_ICONS[key], t["icon"]))
+        self.theme_btn.setIcon(icon(THEME_ICONS[self.theme], t["icon"]))
         self.overlay.setStyleSheet(
             f"background-color: {('rgba(10, 10, 15, 200)' if self._effective_theme == 'dark' else 'rgba(255, 255, 255, 215)')};"
         )
 
     def _retranslate_ui(self) -> None:
-        for key in THEME_OPTIONS:
-            self.theme_combo.setItemData(self.theme_combo.findData(key), tr(f"theme.{key}"), Qt.ToolTipRole)
-        self.theme_combo.setToolTip(tr(f"theme.{self.theme}"))
+        self.theme_btn.setToolTip(tr(f"theme.{self.theme}"))
         self.url_edit.setPlaceholderText(tr("url.placeholder"))
         self.open_browser_btn.setToolTip(tr("tooltip.open_in_browser"))
         self.settings_btn.setToolTip(tr("button.settings"))
