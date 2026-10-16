@@ -29,6 +29,40 @@ def test_history_card_ok_entry_shows_play_and_finder_buttons(qtbot, tmp_path):
     assert card.actions_widget.isHidden() is False
 
 
+def test_history_card_clicking_title_row_toggles_like_chevron(qtbot, tmp_path):
+    f = tmp_path / "track.mp3"
+    f.write_bytes(b"x")
+    entry = {
+        "ts": "now", "url": "https://x", "title": "T", "kind": "audio", "container": "mp3",
+        "site": "yt-dlp", "status": "ok", "path": str(f),
+    }
+    card = HistoryCard(entry, 0, TOKENS["dark"], load_into_player_cb=lambda *a: None)
+    qtbot.addWidget(card)
+    card.show()
+    header_widget = card.checkbox.parent()
+    qtbot.mouseClick(header_widget, Qt.LeftButton)
+    assert card.detail_widget is not None
+    assert card.detail_widget.isHidden() is False
+
+    qtbot.mouseClick(header_widget, Qt.LeftButton)
+    assert card.detail_widget.isHidden() is True
+
+
+def test_history_card_clicking_checkbox_does_not_toggle_expansion(qtbot, tmp_path):
+    f = tmp_path / "track.mp3"
+    f.write_bytes(b"x")
+    entry = {
+        "ts": "now", "url": "https://x", "title": "T", "kind": "audio", "container": "mp3",
+        "site": "yt-dlp", "status": "ok", "path": str(f),
+    }
+    card = HistoryCard(entry, 0, TOKENS["dark"], load_into_player_cb=lambda *a: None)
+    qtbot.addWidget(card)
+    card.show()
+    qtbot.mouseClick(card.checkbox, Qt.LeftButton)
+    assert card.checkbox.isChecked() is True
+    assert card.detail_widget is None  # still collapsed -- checkbox click must not expand
+
+
 def test_history_card_does_not_read_media_info_until_expanded(qtbot, tmp_path):
     f = tmp_path / "track.mp3"
     f.write_bytes(b"x")
