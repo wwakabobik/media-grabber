@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import json
 import os
-import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -39,6 +38,10 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+from logger import get_logger, setup_logging
+
+log = get_logger(__name__)
 
 STATE_PATH = Path.home() / ".config" / "media-grabber" / "state.json"
 DEFAULT_DEST = str(Path.home() / "Downloads")
@@ -90,6 +93,14 @@ class DownloadWorker(QThread):
         self.max_height = max_height
 
     def run(self) -> None:
+        log.info(
+            "download.start",
+            url=self.url,
+            kind=self.kind,
+            container=self.container,
+            dest_dir=self.dest_dir,
+            max_height=self.max_height,
+        )
         try:
             if is_spotify(self.url):
                 if self.kind == "video":
@@ -97,8 +108,10 @@ class DownloadWorker(QThread):
                 result = self._spotdl()
             else:
                 result = self._ytdlp()
+            log.info("download.ok", url=self.url, title=result.get("title"), path=result.get("path"))
             self.finished_ok.emit(result)
         except Exception as e:  # noqa: BLE001 -- yt-dlp/spotdl raise all sorts; surface whatever it is to the UI
+            log.error("download.failed", url=self.url, kind=self.kind, error=str(e))
             self.failed.emit(str(e))
 
     def _hook(self, d: dict) -> None:
@@ -137,6 +150,7 @@ class DownloadWorker(QThread):
             probe_info = probe.extract_info(self.url, download=False)
         default_path = Path(probe.prepare_filename(probe_info)).with_suffix(f".{ext}")
         unique_stem = self._make_unique(Path(self.dest_dir) / default_path.name).stem
+        log.debug("ytdlp.title_resolved", url=self.url, title=probe_info.get("title"), unique_stem=unique_stem)
 
         opts: dict = {
             "outtmpl": f"{self.dest_dir}/{unique_stem}.%(ext)s",
@@ -169,23 +183,30 @@ class DownloadWorker(QThread):
         }
 
     def _spotdl(self) -> dict:
+        # Drive spotdl's library API in-process rather than shelling out to the "spotdl"
+        # CLI command: that command only exists on PATH in the dev venv, not in the
+        # frozen .app, where there's no separate spotdl executable to find.
+        from spotdl import Spotdl
+        from spotdl.utils.config import DEFAULT_CONFIG
+
         Path(self.dest_dir).mkdir(parents=True, exist_ok=True)
-        before = set(Path(self.dest_dir).glob("*"))
-        self.progress.emit(10, "Поиск трека через spotdl…")
-        result = subprocess.run(
-            ["spotdl", "download", self.url, "--output", f"{self.dest_dir}/{{title}}.{{output-ext}}"],
-            capture_output=True,
-            text=True,
-            timeout=600,
-            check=False,
+        self.progress.emit(10, "Поиск трека через Spotify…")
+        client = Spotdl(
+            client_id=DEFAULT_CONFIG["client_id"],
+            client_secret=DEFAULT_CONFIG["client_secret"],
+            downloader_settings={"output": f"{self.dest_dir}/{{artists}} - {{title}}.{{output-ext}}"},
         )
-        if result.returncode != 0:
-            raise RuntimeError(result.stderr[-1500:] or "spotdl завершился с ошибкой")
-        new_files = list(set(Path(self.dest_dir).glob("*")) - before)
-        if not new_files:
-            raise RuntimeError("spotdl не скачал ни одного файла")
-        path = str(new_files[0])
-        return {"title": Path(path).stem, "path": path, "kind": "audio", "site": "spotify"}
+        songs = client.search([self.url])
+        if not songs:
+            log.error("spotdl.not_found", url=self.url)
+            raise RuntimeError("Spotify: трек не найден")
+        log.debug("spotdl.matched", url=self.url, song=songs[0].display_name)
+        self.progress.emit(30, "Скачивание через spotdl…")
+        song, path = client.download(songs[0])
+        if path is None:
+            log.error("spotdl.download_failed", url=self.url, song=song.display_name)
+            raise RuntimeError("spotdl не смог скачать трек")
+        return {"title": song.display_name, "path": str(path), "kind": "audio", "site": "spotify"}
 
 
 STYLE = """
@@ -234,6 +255,7 @@ class MainWindow(QMainWindow):
         self.format_combo = QComboBox()
         self.format_combo.addItems(FORMATS.keys())
         self.format_combo.currentTextChanged.connect(self._on_format_changed)
+        self.url_edit.textChanged.connect(self._on_url_changed)
         self.quality_combo = QComboBox()
         self.quality_combo.addItems(QUALITIES.keys())
         row1.addWidget(self.url_edit, 3)
@@ -335,6 +357,18 @@ class MainWindow(QMainWindow):
         kind, _ = FORMATS[text]
         self.quality_combo.setEnabled(kind == "video")
 
+    def _on_url_changed(self, text: str) -> None:
+        # Spotify is audio-only: there's no video to offer, so grey that choice out
+        # instead of letting the user pick it and then hitting an error on download.
+        spotify = is_spotify(text)
+        model = self.format_combo.model()
+        for i in range(self.format_combo.count()):
+            kind, _ = FORMATS[self.format_combo.itemText(i)]
+            model.item(i).setEnabled(not (spotify and kind == "video"))
+        if spotify and FORMATS[self.format_combo.currentText()][0] == "video":
+            audio_key = next(k for k, (kind, _) in FORMATS.items() if kind == "audio")
+            self.format_combo.setCurrentText(audio_key)
+
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
         self.overlay.setGeometry(self.centralWidget().rect())
@@ -367,6 +401,7 @@ class MainWindow(QMainWindow):
         self.state["last_dest"] = dest
         save_state(self.state)
 
+        log.info("ui.download_clicked", url=url, kind=kind, container=container, dest=dest, max_height=max_height)
         self.progress.setValue(0)
         self._set_status("Запуск…", "busy")
         self._set_busy(True, "Скачивание…")
@@ -503,12 +538,15 @@ class MainWindow(QMainWindow):
 
         history = self.state.get("history", [])
         indices = sorted({it.data(0, Qt.UserRole) for it in top_items}, reverse=True)
+        delete_from_disk = clicked is with_disk_btn
+        log.info("ui.history_delete", count=len(indices), delete_from_disk=delete_from_disk)
         for idx in indices:
             entry = history[idx]
-            if clicked is with_disk_btn and entry.get("status") == "ok":
+            if delete_from_disk and entry.get("status") == "ok":
                 try:
                     Path(entry["path"]).unlink(missing_ok=True)
                 except OSError as e:
+                    log.error("ui.history_delete_file_failed", path=entry["path"], error=str(e))
                     QMessageBox.warning(self, "media-grabber", f"Не удалось удалить файл {entry['path']}: {e}")
             del history[idx]
         save_state(self.state)
@@ -516,6 +554,8 @@ class MainWindow(QMainWindow):
 
 
 def main() -> None:
+    setup_logging()
+    log.info("app.start")
     app = QApplication(sys.argv)
     app.setStyleSheet(STYLE)
     window = MainWindow()
