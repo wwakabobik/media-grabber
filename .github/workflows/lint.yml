@@ -1,0 +1,39 @@
+name: Lint & Test
+
+# Runs on every push to any branch except master (master is only ever
+# reached via a reviewed, already-green PR merge).
+on:
+  push:
+    branches-ignore:
+      - master
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          version: "latest"
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install dependencies
+        run: uv sync --all-groups
+
+      - name: ruff
+        run: uv run ruff check .
+
+      - name: Install Qt runtime libs
+        # main.py imports PySide6.QtGui/QtWidgets at module load time (no display needed,
+        # but the shared libs below must be present for the import itself to succeed).
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libegl1 libopengl0 libxkbcommon0 libxcb-cursor0 \
+            libpulse0 libnss3 libxcomposite1 libxrandr2 libxtst6 libasound2t64
+
+      - name: pytest
+        run: uv run pytest -q
