@@ -1,7 +1,7 @@
 from unittest.mock import patch
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QLabel, QMessageBox
+from PySide6.QtWidgets import QLabel, QMessageBox, QScrollArea
 
 from main import HistoryCard, MainWindow, PlaylistDialog, SettingsDialog
 from theme import TOKENS
@@ -266,6 +266,23 @@ def test_main_window_history_scroll_has_a_minimum_height_floor(qtbot):
     # could squeeze this to near-zero with no way to reach it -- regression
     # test for that, not a claim about the exact pixel value.
     assert win.history_scroll.minimumHeight() >= 150
+
+
+def test_main_window_content_is_scrollable_when_window_is_too_small(qtbot, tmp_path):
+    # The real fix for "nothing reachable when the video player is open": the
+    # whole window content sits in an outer QScrollArea, so a window shorter
+    # than its content is always reachable by scrolling, not just squeezed.
+    f = tmp_path / "clip.mp4"
+    f.write_bytes(b"x")
+    win = MainWindow()
+    qtbot.addWidget(win)
+    win.resize(820, 500)
+    win._load_into_player(str(f), "video", "A Clip")
+
+    outer = win.centralWidget()
+    assert isinstance(outer, QScrollArea)
+    assert outer.widget().sizeHint().height() > outer.viewport().height()
+    assert outer.verticalScrollBar().maximum() > 0
 
 
 def test_main_window_save_info_panel_writes_file(qtbot, tmp_path):

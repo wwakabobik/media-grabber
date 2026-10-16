@@ -863,8 +863,19 @@ class MainWindow(QMainWindow):
         self.worker: DownloadWorker | None = None
         self.theme = self.state.get("theme", "dark")
 
+        # The whole window content sits inside a scroll area, not directly on
+        # centralWidget: with the video player open, everything above it plus
+        # the history list could need more height than the window has, with
+        # nothing to shrink and no way to reach whatever got pushed out --
+        # collapsing the video (added separately below) helps the common case,
+        # but this is the actual floor: there's always a way to scroll down to
+        # any control, regardless of window size or what else is open.
+        outer_scroll = QScrollArea()
+        outer_scroll.setWidgetResizable(True)
+        outer_scroll.setFrameShape(QScrollArea.NoFrame)
+        self.setCentralWidget(outer_scroll)
         root = QWidget()
-        self.setCentralWidget(root)
+        outer_scroll.setWidget(root)
         layout = QVBoxLayout(root)
         layout.setSpacing(12)
         layout.setContentsMargins(18, 16, 18, 16)
@@ -1064,10 +1075,13 @@ class MainWindow(QMainWindow):
         self.history_scroll = QScrollArea()
         self.history_scroll.setWidgetResizable(True)
         self.history_scroll.setFrameShape(QScrollArea.NoFrame)
-        # A floor so this never gets squeezed to nothing when the video player
-        # and everything above it don't fit the window -- without this, it had
-        # no minimum of its own and could shrink to an unreachable sliver.
+        # Bounded height so it keeps its own internal scrollbar (and a floor so
+        # it's never squeezed to nothing) instead of expanding to fit every
+        # card -- now that it's inside the outer scroll area above, nothing
+        # would otherwise stop it from growing to the full height of the
+        # history list.
         self.history_scroll.setMinimumHeight(180)
+        self.history_scroll.setMaximumHeight(420)
         self.history_container = QWidget()
         self.history_container_layout = QVBoxLayout(self.history_container)
         self.history_container_layout.setSpacing(8)
