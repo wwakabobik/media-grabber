@@ -18,6 +18,7 @@ os.environ.setdefault("QT_MAC_WANTS_LAYER", "1")  # frozen/signed .app: video wi
 
 import yt_dlp
 from PySide6.QtCore import QThread, QUrl, Qt, Signal
+from PySide6.QtGui import QColor
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
@@ -109,13 +110,39 @@ class DownloadWorker(QThread):
         elif d["status"] == "finished":
             self.progress.emit(96, "Обработка файла…")
 
+    @staticmethod
+    def _make_unique(path: Path) -> Path:
+        if not path.exists():
+            return path
+        n = 1
+        while True:
+            candidate = path.with_name(f"{path.stem} ({n}){path.suffix}")
+            if not candidate.exists():
+                return candidate
+            n += 1
+
     def _ytdlp(self) -> dict:
         Path(self.dest_dir).mkdir(parents=True, exist_ok=True)
-        opts: dict = {
+        ext = "mp3" if self.kind == "audio" else self.container
+
+        # Resolve the title first (no download) so a repeat download of the same
+        # video gets "Title (1).ext" instead of silently overwriting the first file.
+        probe_opts = {
+            "skip_download": True,
+            "quiet": True,
+            "noplaylist": True,
             "outtmpl": f"{self.dest_dir}/%(title)s.%(ext)s",
+        }
+        with yt_dlp.YoutubeDL(probe_opts) as probe:
+            probe_info = probe.extract_info(self.url, download=False)
+        default_path = Path(probe.prepare_filename(probe_info)).with_suffix(f".{ext}")
+        unique_stem = self._make_unique(Path(self.dest_dir) / default_path.name).stem
+
+        opts: dict = {
+            "outtmpl": f"{self.dest_dir}/{unique_stem}.%(ext)s",
             "noplaylist": True,
             "progress_hooks": [self._hook],
-            "overwrites": True,  # otherwise yt-dlp reuses a stale file of the same name as-is
+            "overwrites": True,
         }
         if self.kind == "audio":
             opts["format"] = "bestaudio/best"
@@ -432,7 +459,9 @@ class MainWindow(QMainWindow):
             top.setData(0, Qt.UserRole, idx)
             self.history_tree.addTopLevelItem(top)
             if missing:
-                top.setDisabled(True)  # file gone from disk: show as info only, no actions
+                # file gone from disk: grey it out (no play button below), but keep it
+                # selectable so it can still be picked and removed from the list
+                top.setForeground(0, QColor("#6e6e7a"))
 
             detail_lines = [f"URL: {entry['url']}", f"Формат: {entry.get('container', '?')}", f"Источник: {entry.get('site', '?')}"]
             if entry.get("status") == "ok":
