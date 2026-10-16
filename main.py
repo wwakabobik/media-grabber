@@ -49,6 +49,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from i18n import LANGUAGES, get_language, set_language, tr
 from logger import get_logger, setup_logging
 from theme import TOKENS, icon, stylesheet
 
@@ -57,19 +58,24 @@ log = get_logger(__name__)
 STATE_PATH = Path.home() / ".config" / "media-grabber" / "state.json"
 DEFAULT_DEST = str(Path.home() / "Downloads")
 
+# Stable internal keys -> (kind, container); display text is tr("format.<key>"),
+# looked up by key (QComboBox userData) rather than currentText() so the combo
+# can be relabeled on a language switch without losing the selection.
 FORMATS = {
-    "Видео (MP4)": ("video", "mp4"),
-    "Видео (WebM)": ("video", "webm"),
-    "Аудио (MP3)": ("audio", "mp3"),
+    "video_mp4": ("video", "mp4"),
+    "video_webm": ("video", "webm"),
+    "audio_mp3": ("audio", "mp3"),
 }
 
 QUALITIES = {
-    "Лучшее": None,
+    "best": None,
     "1080p": 1080,
     "720p": 720,
     "480p": 480,
     "360p": 360,
 }
+
+THEME_OPTIONS = ["light", "dark", "system"]
 
 
 YANDEX_TRACK_RE = re.compile(r"music\.yandex\.\w+/album/(\d+)/track/(\d+)")
@@ -213,7 +219,7 @@ def format_chapters(chapters: list[dict] | None) -> str | None:
         return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
 
     lines = [f"{_timestamp(c.get('start_time'))}  {c.get('title', '?')}" for c in chapters]
-    return "Главы:\n" + "\n".join(lines)
+    return tr("chapters.header") + "\n" + "\n".join(lines)
 
 
 def clean_description(text: str | None) -> str | None:
@@ -231,7 +237,7 @@ def friendly_error(url: str, message: str) -> str:
     guess) -- translate that one well-known, unfixable-without-cookies case
     instead of surfacing yt-dlp's raw English wall of text."""
     if "vimeo.com" in url and "only works when logged-in" in message:
-        return "Vimeo требует авторизации даже для этого видео — без куки залогиненного аккаунта yt-dlp скачать не может (ограничение самого Vimeo, не этого приложения)."
+        return tr("error.vimeo_login_wall")
     return message
 
 
@@ -240,6 +246,97 @@ def reveal_in_finder(path: str) -> None:
         subprocess.run(["open", "-R", path], check=False)
     else:
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(Path(path).parent)))
+
+
+def make_unique_path(path: Path) -> Path:
+    if not path.exists():
+        return path
+    n = 1
+    while True:
+        candidate = path.with_name(f"{path.stem} ({n}){path.suffix}")
+        if not candidate.exists():
+            return candidate
+        n += 1
+
+
+def entry_disk_status(entry: dict) -> str:
+    """"on_disk" (downloaded and still there), "missing" (downloaded, file
+    gone since -- deleted outside the app) or "error" (download itself failed)."""
+    if entry.get("status") != "ok":
+        return "error"
+    return "on_disk" if Path(entry.get("path", "")).exists() else "missing"
+
+
+# Audio-only containers a file can be converted to. Video can additionally
+# convert to another video container (CONVERT_VIDEO_TARGETS) or have its
+# audio extracted into one of these -- never the other way around (no app
+# here can synthesize video from audio).
+CONVERT_AUDIO_TARGETS = ["mp3", "wav", "m4a", "flac", "ogg", "aac", "opus"]
+CONVERT_VIDEO_TARGETS = ["mp4", "webm", "mkv", "mov", "avi"]
+
+
+class ConvertWorker(QThread):
+    """Runs ffmpeg directly (not through yt-dlp) to transcode an already
+    downloaded file, or pull just the audio out of a video, into a separate
+    new file -- the source is never modified or removed."""
+
+    finished_ok = Signal(dict)
+    failed = Signal(str)
+
+    def __init__(self, src_path: str, target_container: str, audio_only: bool):
+        super().__init__()
+        self.src_path = src_path
+        self.target_container = target_container
+        self.audio_only = audio_only
+
+    def run(self) -> None:
+        src = Path(self.src_path)
+        dest = make_unique_path(src.with_name(f"{src.stem} (converted).{self.target_container}"))
+        cmd = ["ffmpeg", "-y", "-i", str(src)]
+        if self.audio_only:
+            cmd.append("-vn")
+        cmd.append(str(dest))
+        log.info("convert.start", src=self.src_path, dest=str(dest))
+        try:
+            subprocess.run(cmd, check=True, capture_output=True, text=True)
+        except subprocess.CalledProcessError as e:
+            log.error("convert.failed", src=self.src_path, error=e.stderr[-500:] if e.stderr else str(e))
+            self.failed.emit(e.stderr.strip().splitlines()[-1] if e.stderr else str(e))
+            return
+        except FileNotFoundError:
+            self.failed.emit("ffmpeg not found")
+            return
+        kind = "audio" if self.audio_only else ("audio" if self.target_container in CONVERT_AUDIO_TARGETS else "video")
+        log.info("convert.ok", dest=str(dest))
+        self.finished_ok.emit({"path": str(dest), "kind": kind, "container": self.target_container})
+
+
+class ConvertDialog(QDialog):
+    def __init__(self, src_kind: str, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(tr("dialog.convert_title"))
+        self.resize(360, 140)
+        # (container, audio_only) pairs the combo offers for this source kind.
+        self.targets: list[tuple[str, bool]] = [(c, False) for c in CONVERT_AUDIO_TARGETS]
+        if src_kind == "video":
+            self.targets = [(c, False) for c in CONVERT_VIDEO_TARGETS] + [(c, True) for c in CONVERT_AUDIO_TARGETS]
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel(tr("convert.target_label")))
+        self.target_combo = QComboBox()
+        for container, audio_only in self.targets:
+            label = f"{container} ({tr('kind.audio')})" if audio_only else container
+            self.target_combo.addItem(label)
+        layout.addWidget(self.target_combo)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.button(QDialogButtonBox.Ok).setText(tr("convert.button"))
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def target(self) -> tuple[str, bool]:
+        return self.targets[self.target_combo.currentIndex()]
 
 
 def resolve_playlist(url: str, yandex_token: str) -> tuple[str, list[tuple[str, str]]] | None:
@@ -335,11 +432,11 @@ class DownloadWorker(QThread):
         try:
             if is_spotify(self.url):
                 if self.kind == "video":
-                    raise ValueError("У Spotify нет видео — выбери «Аудио (MP3)».")
+                    raise ValueError(tr("error.spotify_no_video"))
                 result = self._spotdl()
             elif is_yandex_music(self.url):
                 if self.kind == "video":
-                    raise ValueError("У Яндекс.Музыки нет видео — выбери «Аудио (MP3)».")
+                    raise ValueError(tr("error.yandex_no_video"))
                 result = self._yandex()
             else:
                 result = self._ytdlp()
@@ -354,20 +451,13 @@ class DownloadWorker(QThread):
             total = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
             done = d.get("downloaded_bytes", 0)
             pct = int(done / total * 95) if total else 0
-            self.progress.emit(pct, "Скачивание…")
+            self.progress.emit(pct, tr("progress.downloading"))
         elif d["status"] == "finished":
-            self.progress.emit(96, "Обработка файла…")
+            self.progress.emit(96, tr("progress.processing_file"))
 
     @staticmethod
     def _make_unique(path: Path) -> Path:
-        if not path.exists():
-            return path
-        n = 1
-        while True:
-            candidate = path.with_name(f"{path.stem} ({n}){path.suffix}")
-            if not candidate.exists():
-                return candidate
-            n += 1
+        return make_unique_path(path)
 
     def _ytdlp(self) -> dict:
         Path(self.dest_dir).mkdir(parents=True, exist_ok=True)
@@ -463,18 +553,18 @@ class DownloadWorker(QThread):
         # a process-wide singleton (spotdl raises on a second init), so it's shared/reused
         # across every item in a playlist batch rather than rebuilt per download.
         Path(self.dest_dir).mkdir(parents=True, exist_ok=True)
-        self.progress.emit(10, "Поиск трека через Spotify…")
+        self.progress.emit(10, tr("progress.spotify_search"))
         client = _get_spotdl_client(f"{self.dest_dir}/{{artists}} - {{title}}.{{output-ext}}")
         songs = client.search([self.url])
         if not songs:
             log.error("spotdl.not_found", url=self.url)
-            raise RuntimeError("Spotify: трек не найден")
+            raise RuntimeError(tr("error.spotify_not_found"))
         log.debug("spotdl.matched", url=self.url, song=songs[0].display_name)
-        self.progress.emit(30, "Скачивание через spotdl…")
+        self.progress.emit(30, tr("progress.spotify_downloading"))
         song, path = client.download(songs[0])
         if path is None:
             log.error("spotdl.download_failed", url=self.url, song=song.display_name)
-            raise RuntimeError("spotdl не смог скачать трек")
+            raise RuntimeError(tr("error.spotdl_failed"))
         return {
             "title": song.display_name,
             "path": str(path),
@@ -485,7 +575,7 @@ class DownloadWorker(QThread):
 
     def _yandex(self) -> dict:
         if not self.yandex_token:
-            raise ValueError("Нужен токен Яндекс.Музыки — добавь его в Настройках.")
+            raise ValueError(tr("error.yandex_token_needed"))
         from yandex_music import Client
 
         if self.url.startswith("yandex:"):
@@ -493,10 +583,10 @@ class DownloadWorker(QThread):
         else:
             m = YANDEX_TRACK_RE.search(self.url)
             if not m:
-                raise ValueError("Не похоже на ссылку на трек Яндекс.Музыки.")
+                raise ValueError(tr("error.yandex_bad_url"))
             track_id = m.group(2)
 
-        self.progress.emit(10, "Получение трека с Яндекс.Музыки…")
+        self.progress.emit(10, tr("progress.yandex_fetching"))
         client = Client(self.yandex_token).init()
         track = client.tracks([track_id])[0]
         title = _yandex_track_title(track)
@@ -504,7 +594,7 @@ class DownloadWorker(QThread):
 
         Path(self.dest_dir).mkdir(parents=True, exist_ok=True)
         target = self._make_unique(Path(self.dest_dir) / f"{title}.mp3")
-        self.progress.emit(40, "Скачивание с Яндекс.Музыки…")
+        self.progress.emit(40, tr("progress.yandex_downloading"))
         track.download(str(target))
         self._tag_yandex_track(target, track)
         lyrics = None
@@ -602,17 +692,17 @@ class PreviewWorker(QThread):
             client = _get_spotdl_client("{artists} - {title}.{output-ext}")
             songs = client.search([self.url])
             if not songs:
-                raise RuntimeError("Spotify: ничего не найдено")
+                raise RuntimeError("Spotify: nothing found")  # never shown to the user, preview failures are silent
             song = songs[0]
             cover = self._download_bytes(song.cover_url) if song.cover_url else None
             return {"title": song.display_name, "duration": song.duration, "cover": cover}
 
         if is_yandex_music(self.url):
             if not self.yandex_token:
-                raise RuntimeError("нужен токен")
+                raise RuntimeError("token needed")  # never shown to the user, preview failures are silent
             m = YANDEX_TRACK_RE.search(self.url)
             if not m:
-                raise RuntimeError("не похоже на трек")
+                raise RuntimeError("doesn't look like a track")
             from yandex_music import Client
 
             client = Client(self.yandex_token).init()
@@ -636,13 +726,13 @@ class PreviewWorker(QThread):
 class PlaylistDialog(QDialog):
     def __init__(self, name: str, items: list[tuple[str, str]], parent=None):
         super().__init__(parent)
-        self.setWindowTitle(name or "Плейлист / альбом")
+        self.setWindowTitle(name or tr("dialog.playlist_default_title"))
         self.resize(480, 420)
         self.items = items
 
         layout = QVBoxLayout(self)
-        layout.addWidget(QLabel(f"«{name}» — найдено {len(items)}. Выбери, что скачать:"))
-        layout.addWidget(QLabel(f"Сохранится в подпапку «{name}»."))
+        layout.addWidget(QLabel(tr("dialog.playlist_found", name=name, count=len(items))))
+        layout.addWidget(QLabel(tr("dialog.playlist_subfolder", name=name)))
 
         self.list_widget = QListWidget()
         for title, _ref in items:
@@ -653,10 +743,10 @@ class PlaylistDialog(QDialog):
         layout.addWidget(self.list_widget)
 
         select_row = QHBoxLayout()
-        all_btn = QPushButton("Выбрать всё")
+        all_btn = QPushButton(tr("button.select_all"))
         all_btn.setObjectName("secondary")
         all_btn.clicked.connect(lambda: self._set_all(Qt.Checked))
-        none_btn = QPushButton("Снять всё")
+        none_btn = QPushButton(tr("button.select_none"))
         none_btn.setObjectName("secondary")
         none_btn.clicked.connect(lambda: self._set_all(Qt.Unchecked))
         select_row.addWidget(all_btn)
@@ -679,15 +769,33 @@ class PlaylistDialog(QDialog):
 
 
 class SettingsDialog(QDialog):
-    def __init__(self, yandex_token: str, parent=None):
+    def __init__(self, yandex_token: str, dest: str, language: str, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Настройки")
-        self.resize(420, 140)
+        self.setWindowTitle(tr("dialog.settings_title"))
+        self.resize(460, 220)
 
         layout = QVBoxLayout(self)
-        layout.addWidget(QLabel("Токен Яндекс.Музыки (нужен для скачивания — своей учётки, без него API анонимно не отдаёт треки):"))
+
+        layout.addWidget(QLabel(tr("settings.dest_label")))
+        dest_row = QHBoxLayout()
+        self.dest_edit = QLineEdit(dest)
+        browse_btn = QPushButton(tr("button.browse_folder"))
+        browse_btn.setObjectName("secondary")
+        browse_btn.clicked.connect(self._pick_dest)
+        dest_row.addWidget(self.dest_edit, 1)
+        dest_row.addWidget(browse_btn)
+        layout.addLayout(dest_row)
+
+        layout.addWidget(QLabel(tr("settings.language_label")))
+        self.language_combo = QComboBox()
+        for code, label in LANGUAGES.items():
+            self.language_combo.addItem(label, code)
+        self.language_combo.setCurrentIndex(self.language_combo.findData(language))
+        layout.addWidget(self.language_combo)
+
+        layout.addWidget(QLabel(tr("settings.yandex_token_label")))
         self.token_edit = QLineEdit(yandex_token)
-        self.token_edit.setPlaceholderText("OAuth-токен аккаунта Яндекс.Музыки")
+        self.token_edit.setPlaceholderText(tr("settings.yandex_token_placeholder"))
         layout.addWidget(self.token_edit)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
@@ -695,8 +803,19 @@ class SettingsDialog(QDialog):
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
 
+    def _pick_dest(self) -> None:
+        folder = QFileDialog.getExistingDirectory(self, tr("dialog.pick_dest_folder_title"), self.dest_edit.text())
+        if folder:
+            self.dest_edit.setText(folder)
+
     def token(self) -> str:
         return self.token_edit.text().strip()
+
+    def dest(self) -> str:
+        return self.dest_edit.text().strip() or DEFAULT_DEST
+
+    def language(self) -> str:
+        return self.language_combo.currentData()
 
 
 class HistoryCard(QWidget):
@@ -704,20 +823,22 @@ class HistoryCard(QWidget):
     those don't resize correctly to wrapped multi-line content, which used to clip
     text and overlap the action buttons with the row underneath)."""
 
-    def __init__(self, entry: dict, idx: int, theme_tokens: dict, load_into_player_cb, parent=None):
+    def __init__(self, entry: dict, idx: int, theme_tokens: dict, load_into_player_cb, convert_requested_cb=None, parent=None):
         super().__init__(parent)
         self.entry = entry
         self.idx = idx
         self.theme_tokens = theme_tokens
         self.load_into_player_cb = load_into_player_cb
+        self.convert_requested_cb = convert_requested_cb or (lambda *a: None)
         self.setObjectName("card")
         self.extra_box: QTextEdit | None = None
         self._populated = False
         t = theme_tokens
 
-        kind_word = "видео" if entry.get("kind") == "video" else "аудио"
-        self.on_disk = entry.get("status") == "ok" and Path(entry.get("path", "")).exists()
-        missing = entry.get("status") == "ok" and not self.on_disk
+        kind_word = tr("kind.video") if entry.get("kind") == "video" else tr("kind.audio")
+        disk_status = entry_disk_status(entry)
+        self.on_disk = disk_status == "on_disk"
+        missing = disk_status == "missing"
         if self.on_disk:
             status_icon, status_color = "check", t["success"]
         elif missing:
@@ -794,23 +915,23 @@ class HistoryCard(QWidget):
             detail_layout.addWidget(cover_label)
 
         detail_lines = [
-            f"Скачано: {entry['ts']}",
+            tr("card.downloaded", v=entry["ts"]),
             f"URL: {entry['url']}",
-            f"Формат: {entry.get('container', '?')}",
-            f"Источник: {entry.get('site', '?')}",
+            tr("card.format", v=entry.get("container", "?")),
+            tr("card.source", v=entry.get("site", "?")),
         ]
         if entry.get("status") == "ok":
             if "duration" in media:
-                detail_lines.append(f"Длительность: {format_duration(media['duration'])}")
-            detail_lines.append(f"Файл: {entry.get('path', '?')}")
+                detail_lines.append(tr("card.duration", v=format_duration(media["duration"])))
+            detail_lines.append(tr("card.file", v=entry.get("path", "?")))
             if entry.get("subtitle_files"):
-                detail_lines.append(f"Субтитры: {len(entry['subtitle_files'])} файл(ов) рядом с видео")
+                detail_lines.append(tr("card.subtitles", n=len(entry["subtitle_files"])))
             if entry.get("chapters"):
-                detail_lines.append(f"Главы: {len(entry['chapters'])}")
+                detail_lines.append(tr("card.chapters_count", n=len(entry["chapters"])))
             if missing:
-                detail_lines.append("(файл удалён с диска)")
+                detail_lines.append(tr("card.missing_from_disk"))
         else:
-            detail_lines.append(f"Ошибка: {entry.get('error', '?')}")
+            detail_lines.append(tr("card.error", v=entry.get("error", "?")))
         text_label = QLabel("\n".join(detail_lines))
         text_label.setObjectName("dim")
         text_label.setWordWrap(True)
@@ -832,19 +953,25 @@ class HistoryCard(QWidget):
         actions_layout.setContentsMargins(0, 4, 0, 0)
         actions_layout.setSpacing(8)
         if self.on_disk:
-            play_btn = QPushButton(" Открыть в плеере")
+            play_btn = QPushButton(tr("button.open_in_player"))
             play_btn.setObjectName("secondary")
             play_btn.setIcon(icon("play", t["icon"]))
             path, kind, title = entry["path"], entry["kind"], entry["title"]
             play_btn.clicked.connect(lambda _=None: self.load_into_player_cb(path, kind, title))
             actions_layout.addWidget(play_btn)
 
-            finder_btn = QPushButton(" Показать в Finder")
+            finder_btn = QPushButton(tr("button.show_in_finder"))
             finder_btn.setObjectName("secondary")
             finder_btn.setIcon(icon("folder", t["icon"]))
             finder_btn.clicked.connect(lambda _=None, p=path: reveal_in_finder(p))
             actions_layout.addWidget(finder_btn)
-        link_btn = QPushButton(" Открыть ссылку")
+
+            convert_btn = QPushButton(tr("button.convert"))
+            convert_btn.setObjectName("secondary")
+            convert_btn.setIcon(icon("film" if kind == "video" else "music", t["icon"]))
+            convert_btn.clicked.connect(lambda _=None: self.convert_requested_cb(path, kind))
+            actions_layout.addWidget(convert_btn)
+        link_btn = QPushButton(tr("button.open_link"))
         link_btn.setIcon(icon("globe", t["icon"]))
         link_btn.setObjectName("secondary")
         entry_url = entry["url"]
@@ -861,7 +988,10 @@ class MainWindow(QMainWindow):
         self.resize(820, 700)
         self.state = load_state()
         self.worker: DownloadWorker | None = None
-        self.theme = self.state.get("theme", "dark")
+        self.theme = self.state.get("theme", "system")
+        self._effective_theme = "dark"
+        QApplication.instance().styleHints().colorSchemeChanged.connect(self._on_system_theme_changed)
+        set_language(self.state.get("language", "en"))
 
         # The whole window content sits inside a scroll area, not directly on
         # centralWidget: with the video player open, everything above it plus
@@ -880,34 +1010,37 @@ class MainWindow(QMainWindow):
         layout.setSpacing(12)
         layout.setContentsMargins(18, 16, 18, 16)
 
-        # Header: title + theme switch
+        # Header: title + theme switch + settings
         header = QHBoxLayout()
         title_label = QLabel("media-grabber")
         title_label.setObjectName("heading")
         header.addWidget(title_label)
         header.addStretch()
-        self.theme_btn = QPushButton()
-        self.theme_btn.setObjectName("iconBtn")
-        self.theme_btn.setToolTip("Светлая / тёмная тема")
-        self.theme_btn.clicked.connect(self._toggle_theme)
-        header.addWidget(self.theme_btn)
+        self.theme_combo = QComboBox()
+        for key in THEME_OPTIONS:
+            self.theme_combo.addItem(tr(f"theme.{key}"), key)
+        self.theme_combo.setCurrentIndex(self.theme_combo.findData(self.theme))
+        self.theme_combo.currentIndexChanged.connect(self._on_theme_changed)
+        header.addWidget(self.theme_combo)
+        self.settings_btn = QPushButton()
+        self.settings_btn.setObjectName("secondary")
+        self.settings_btn.clicked.connect(self._open_settings)
+        header.addWidget(self.settings_btn)
         layout.addLayout(header)
 
         # URL + format row
         row1 = QHBoxLayout()
         self.url_edit = QLineEdit()
-        self.url_edit.setPlaceholderText(
-            "Ссылка на YouTube / Vimeo / SoundCloud / VK / Spotify / Яндекс.Музыку… (в т.ч. плейлист/альбом)"
-        )
         self.format_combo = QComboBox()
-        self.format_combo.addItems(FORMATS.keys())
-        self.format_combo.currentTextChanged.connect(self._on_format_changed)
+        for key in FORMATS:
+            self.format_combo.addItem(tr(f"format.{key}"), key)
+        self.format_combo.currentIndexChanged.connect(lambda _i: self._on_format_changed())
         self.url_edit.textChanged.connect(self._on_url_changed)
         self.quality_combo = QComboBox()
-        self.quality_combo.addItems(QUALITIES.keys())
+        for key in QUALITIES:
+            self.quality_combo.addItem(tr(f"quality.{key}") if key == "best" else key, key)
         self.open_browser_btn = QPushButton()
         self.open_browser_btn.setObjectName("iconBtn")
-        self.open_browser_btn.setToolTip("Открыть ссылку в браузере")
         self.open_browser_btn.clicked.connect(self._open_current_url)
         row1.addWidget(self.url_edit, 3)
         row1.addWidget(self.format_combo, 1)
@@ -941,39 +1074,37 @@ class MainWindow(QMainWindow):
         self._preview_worker: PreviewWorker | None = None
         self._preview_generation = 0
 
-        # Destination row
-        row2 = QHBoxLayout()
-        self.dest_edit = QLineEdit(self.state.get("last_dest", DEFAULT_DEST))
-        self.browse_btn = QPushButton("Папка…")
-        self.browse_btn.setObjectName("secondary")
-        self.browse_btn.clicked.connect(self._pick_dest)
-        self.settings_btn = QPushButton("Настройки")
-        self.settings_btn.setObjectName("secondary")
-        self.settings_btn.clicked.connect(self._open_settings)
-        row2.addWidget(self.dest_edit, 3)
-        row2.addWidget(self.browse_btn, 1)
-        row2.addWidget(self.settings_btn, 1)
-        layout.addLayout(row2)
-
         # Download button + progress
-        self.download_btn = QPushButton("Скачать")
+        self.download_btn = QPushButton()
         self.download_btn.clicked.connect(self._start_download)
         layout.addWidget(self.download_btn)
 
+        # Hidden until a download is actually running, and hidden again once
+        # it finishes -- it used to sit there showing a stale 0%/100% even
+        # when nothing was happening.
         self.progress = QProgressBar()
         self.progress.setRange(0, 100)
         self.progress.setValue(0)
+        self.progress.hide()
         layout.addWidget(self.progress)
 
-        self.status_label = QLabel("Готов к работе")
+        self.status_label = QLabel()
+        self._status_is_pristine = True
         layout.addWidget(self.status_label)
 
-        # Preview player
+        # Preview player -- the whole section (not just the video frame) stays
+        # hidden until something is actually loaded into it: neither an old
+        # song/video nor a fresh download, so there's nothing to show yet.
+        self.player_section = QWidget()
+        player_layout = QVBoxLayout(self.player_section)
+        player_layout.setContentsMargins(0, 0, 0, 0)
+        self._player_loaded = False
+
         self.video_widget = QVideoWidget()
         self.video_widget.setObjectName("card")
         self.video_widget.setMinimumHeight(260)
         self.video_widget.hide()
-        layout.addWidget(self.video_widget)
+        player_layout.addWidget(self.video_widget)
 
         self.player = QMediaPlayer()
         self.audio_output = QAudioOutput()
@@ -995,40 +1126,42 @@ class MainWindow(QMainWindow):
         self._video_collapsed = False
         self.video_collapse_btn = QPushButton()
         self.video_collapse_btn.setObjectName("iconBtn")
-        self.video_collapse_btn.setToolTip("Свернуть/развернуть видео")
         self.video_collapse_btn.clicked.connect(self._toggle_video_collapsed)
         self.video_collapse_btn.hide()
-        self.now_playing_label = QLabel("")
+        self.now_playing_label = QLabel()
         self.now_playing_label.setObjectName("dim")
         controls.addWidget(self.play_btn)
         controls.addWidget(self.seek_slider, 3)
         controls.addWidget(self.video_collapse_btn)
-        layout.addLayout(controls)
-        layout.addWidget(self.now_playing_label)
+        player_layout.addLayout(controls)
+        player_layout.addWidget(self.now_playing_label)
 
         # Description / lyrics for whatever's currently loaded in the player
         info_header = QHBoxLayout()
-        self.info_toggle_btn = QPushButton("Описание / текст песни")
+        self.info_toggle_btn = QPushButton()
         self.info_toggle_btn.setObjectName("secondary")
         self.info_toggle_btn.clicked.connect(self._toggle_info_panel)
         self.info_toggle_btn.hide()
         info_header.addWidget(self.info_toggle_btn)
-        self.info_save_btn = QPushButton(" Сохранить как…")
+        self.info_save_btn = QPushButton()
         self.info_save_btn.setObjectName("secondary")
-        self.info_save_btn.setIcon(icon("download", TOKENS[self.theme]["icon"]))
+        self.info_save_btn.setIcon(icon("download", TOKENS[self._effective_theme]["icon"]))
         self.info_save_btn.clicked.connect(self._save_info_panel)
         self.info_save_btn.hide()
         info_header.addWidget(self.info_save_btn)
         info_header.addStretch()
-        layout.addLayout(info_header)
+        player_layout.addLayout(info_header)
 
         self.info_panel = QTextEdit()
         self.info_panel.setReadOnly(True)
         self.info_panel.setObjectName("card")
         self.info_panel.setMaximumHeight(140)
         self.info_panel.hide()
-        layout.addWidget(self.info_panel)
+        player_layout.addWidget(self.info_panel)
         self._current_media_text = ""
+
+        self.player_section.hide()
+        layout.addWidget(self.player_section)
 
         self.player.positionChanged.connect(self._on_position)
         self.player.durationChanged.connect(lambda d: self.seek_slider.setRange(0, d))
@@ -1036,11 +1169,11 @@ class MainWindow(QMainWindow):
 
         # History
         history_header = QHBoxLayout()
-        history_title = QLabel("История")
-        history_title.setObjectName("heading")
-        history_header.addWidget(history_title)
+        self.history_title = QLabel()
+        self.history_title.setObjectName("heading")
+        history_header.addWidget(self.history_title)
         history_header.addStretch()
-        self.delete_history_btn = QPushButton("Удалить выбранное")
+        self.delete_history_btn = QPushButton()
         self.delete_history_btn.setObjectName("secondary")
         self.delete_history_btn.clicked.connect(self._delete_selected_history)
         history_header.addWidget(self.delete_history_btn)
@@ -1048,24 +1181,39 @@ class MainWindow(QMainWindow):
 
         self._history_filter = ""
         self.history_search = QLineEdit()
-        self.history_search.setPlaceholderText("Поиск по истории — название, ссылка, источник…")
         self.history_search.textChanged.connect(self._on_history_search)
         layout.addWidget(self.history_search)
 
         filters_row = QHBoxLayout()
         self.filter_site = QComboBox()
         self.filter_site.currentIndexChanged.connect(self._on_history_filters_changed)
-        filters_row.addWidget(QLabel("Источник:"))
+        self.filter_source_label = QLabel()
+        filters_row.addWidget(self.filter_source_label)
         filters_row.addWidget(self.filter_site, 1)
         self.filter_format = QComboBox()
         self.filter_format.currentIndexChanged.connect(self._on_history_filters_changed)
-        filters_row.addWidget(QLabel("Формат:"))
+        self.filter_format_label = QLabel()
+        filters_row.addWidget(self.filter_format_label)
         filters_row.addWidget(self.filter_format, 1)
         self.filter_dir = QComboBox()
         self.filter_dir.currentIndexChanged.connect(self._on_history_filters_changed)
-        filters_row.addWidget(QLabel("Папка:"))
+        self.filter_folder_label = QLabel()
+        filters_row.addWidget(self.filter_folder_label)
         filters_row.addWidget(self.filter_dir, 1)
         layout.addLayout(filters_row)
+
+        filters_row2 = QHBoxLayout()
+        self.filter_kind = QComboBox()
+        self.filter_kind.currentIndexChanged.connect(self._on_history_filters_changed)
+        self.filter_kind_label = QLabel()
+        filters_row2.addWidget(self.filter_kind_label)
+        filters_row2.addWidget(self.filter_kind, 1)
+        self.filter_status = QComboBox()
+        self.filter_status.currentIndexChanged.connect(self._on_history_filters_changed)
+        self.filter_status_label = QLabel()
+        filters_row2.addWidget(self.filter_status_label)
+        filters_row2.addWidget(self.filter_status, 1)
+        layout.addLayout(filters_row2)
 
         # A scroll area of card widgets, not a QTreeWidget: word-wrapped multi-line
         # content inside QTreeWidgetItem rows doesn't get sized correctly by Qt once
@@ -1094,7 +1242,7 @@ class MainWindow(QMainWindow):
         # Overlay shown during a download, blocking input controls
         self.overlay = QWidget(root)
         overlay_layout = QVBoxLayout(self.overlay)
-        self.overlay_label = QLabel("Скачивание…")
+        self.overlay_label = QLabel()
         self.overlay_label.setAlignment(Qt.AlignCenter)
         self.overlay_label.setStyleSheet("font-size: 18px; font-weight: 700; background: transparent;")
         overlay_layout.addStretch()
@@ -1103,26 +1251,25 @@ class MainWindow(QMainWindow):
         self.overlay.hide()
 
         self._apply_theme()
+        self._retranslate_ui()
 
         self._inputs = [
             self.url_edit,
             self.format_combo,
             self.quality_combo,
-            self.dest_edit,
-            self.browse_btn,
             self.settings_btn,
             self.download_btn,
             self.delete_history_btn,
         ]
-        self._on_format_changed(self.format_combo.currentText())
+        self._on_format_changed()
         self._queue: list[tuple[str, str]] = []  # (title, ref_url) still to download
         self._queue_kind = ""
         self._queue_container = ""
         self._queue_max_height: int | None = None
         self._queue_total = 0
 
-    def _on_format_changed(self, text: str) -> None:
-        kind, _ = FORMATS[text]
+    def _on_format_changed(self) -> None:
+        kind, _ = FORMATS[self.format_combo.currentData()]
         self.quality_combo.setEnabled(kind == "video")
 
     def _on_url_changed(self, text: str) -> None:
@@ -1131,11 +1278,11 @@ class MainWindow(QMainWindow):
         audio_only = is_spotify(text) or is_yandex_music(text)
         model = self.format_combo.model()
         for i in range(self.format_combo.count()):
-            kind, _ = FORMATS[self.format_combo.itemText(i)]
+            kind, _ = FORMATS[self.format_combo.itemData(i)]
             model.item(i).setEnabled(not (audio_only and kind == "video"))
-        if audio_only and FORMATS[self.format_combo.currentText()][0] == "video":
+        if audio_only and FORMATS[self.format_combo.currentData()][0] == "video":
             audio_key = next(k for k, (kind, _) in FORMATS.items() if kind == "audio")
-            self.format_combo.setCurrentText(audio_key)
+            self.format_combo.setCurrentIndex(self.format_combo.findData(audio_key))
 
         # Debounced live preview: wait for typing/pasting to settle before fetching.
         self._preview_generation += 1
@@ -1171,35 +1318,85 @@ class MainWindow(QMainWindow):
         self.preview_card.show()
 
     def _open_settings(self) -> None:
-        dlg = SettingsDialog(self.state.get("yandex_token", ""), self)
+        dest = self.state.get("last_dest", DEFAULT_DEST)
+        language = self.state.get("language", get_language())
+        dlg = SettingsDialog(self.state.get("yandex_token", ""), dest, language, self)
         if dlg.exec() == QDialog.Accepted:
             self.state["yandex_token"] = dlg.token()
+            self.state["last_dest"] = dlg.dest()
+            language_changed = dlg.language() != language
+            self.state["language"] = dlg.language()
             save_state(self.state)
+            if language_changed:
+                set_language(dlg.language())
+                self._retranslate_ui()
 
     def _open_current_url(self) -> None:
         url = self.url_edit.text().strip()
         if url:
             QDesktopServices.openUrl(QUrl(url))
 
-    def _toggle_theme(self) -> None:
-        self.theme = "light" if self.theme == "dark" else "dark"
+    def _resolve_effective_theme(self) -> str:
+        if self.theme != "system":
+            return self.theme
+        scheme = QApplication.instance().styleHints().colorScheme()
+        return "light" if scheme == Qt.ColorScheme.Light else "dark"
+
+    def _on_theme_changed(self, _index: int) -> None:
+        self.theme = self.theme_combo.currentData()
         self.state["theme"] = self.theme
         save_state(self.state)
         self._apply_theme()
         self._render_history()
 
+    def _on_system_theme_changed(self, _scheme) -> None:
+        # Only matters while following the OS -- an explicit light/dark pick
+        # is never overridden by the OS changing underneath it.
+        if self.theme == "system":
+            self._apply_theme()
+            self._render_history()
+
     def _apply_theme(self) -> None:
-        t = TOKENS[self.theme]
-        QApplication.instance().setStyleSheet(stylesheet(self.theme))
-        self.theme_btn.setIcon(icon("sun" if self.theme == "dark" else "moon", t["icon"]))
+        self._effective_theme = self._resolve_effective_theme()
+        t = TOKENS[self._effective_theme]
+        QApplication.instance().setStyleSheet(stylesheet(self._effective_theme))
         self.open_browser_btn.setIcon(icon("globe", t["icon"]))
         self.play_btn.setIcon(icon("pause" if self._is_playing() else "play", t["icon"]))
         self.video_collapse_btn.setIcon(icon("chevron-right" if self._video_collapsed else "chevron-down", t["icon"]))
-        self.browse_btn.setIcon(icon("folder", t["icon"]))
         self.settings_btn.setIcon(icon("settings", t["icon"]))
         self.delete_history_btn.setIcon(icon("trash", t["icon"]))
         self.download_btn.setIcon(icon("download", t["accent_text"]))
-        self.overlay.setStyleSheet(f"background-color: {('rgba(10, 10, 15, 200)' if self.theme == 'dark' else 'rgba(255, 255, 255, 215)')};")
+        self.overlay.setStyleSheet(
+            f"background-color: {('rgba(10, 10, 15, 200)' if self._effective_theme == 'dark' else 'rgba(255, 255, 255, 215)')};"
+        )
+
+    def _retranslate_ui(self) -> None:
+        for key in THEME_OPTIONS:
+            self.theme_combo.setItemText(self.theme_combo.findData(key), tr(f"theme.{key}"))
+        self.url_edit.setPlaceholderText(tr("url.placeholder"))
+        self.open_browser_btn.setToolTip(tr("tooltip.open_in_browser"))
+        self.settings_btn.setText(tr("button.settings"))
+        self.download_btn.setText(tr("button.download"))
+        if self._status_is_pristine:
+            self.status_label.setText(tr("status.ready"))
+        self.video_collapse_btn.setToolTip(tr("tooltip.collapse_video"))
+        self.info_toggle_btn.setText(tr("button.description_lyrics"))
+        self.info_save_btn.setText(tr("button.save_as"))
+        self.history_title.setText(tr("heading.history"))
+        self.delete_history_btn.setText(tr("button.delete_selected"))
+        self.history_search.setPlaceholderText(tr("search.history_placeholder"))
+        self.filter_source_label.setText(tr("filter.source_label"))
+        self.filter_format_label.setText(tr("filter.format_label"))
+        self.filter_folder_label.setText(tr("filter.folder_label"))
+        self.filter_kind_label.setText(tr("filter.kind_label"))
+        self.filter_status_label.setText(tr("filter.status_label"))
+        for key in FORMATS:
+            self.format_combo.setItemText(self.format_combo.findData(key), tr(f"format.{key}"))
+        best_idx = self.quality_combo.findData("best")
+        self.quality_combo.setItemText(best_idx, tr("quality.best"))
+        if self._player_loaded:
+            self._update_now_playing_label()
+        self._render_history()  # re-render cards and re-translate the "Все"/"All" filter items
 
     def _is_playing(self) -> bool:
         return self.player.playbackState() == QMediaPlayer.PlayingState
@@ -1218,7 +1415,7 @@ class MainWindow(QMainWindow):
         if running:
             box = QMessageBox(self)
             box.setWindowTitle("media-grabber")
-            box.setText("Идёт скачивание. Закрыть приложение и прервать его?")
+            box.setText(tr("dialog.close_confirm"))
             box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
             box.setDefaultButton(QMessageBox.No)
             if box.exec() != QMessageBox.Yes:
@@ -1229,11 +1426,16 @@ class MainWindow(QMainWindow):
                 w.wait(2000)
         event.accept()
 
-    def _set_busy(self, busy: bool, text: str = "Скачивание…") -> None:
+    def _set_busy(self, busy: bool, text: str | None = None, indeterminate: bool = False) -> None:
         for w in self._inputs:
             w.setEnabled(not busy)
+        self.progress.setVisible(busy)
+        # range(0, 0) makes a QProgressBar run its built-in animated "busy"
+        # pulse instead of showing a flat bar -- used for ffmpeg conversion,
+        # which doesn't report a percentage (vs. downloads, which do).
+        self.progress.setRange(0, 0 if (busy and indeterminate) else 100)
         if busy:
-            self.overlay_label.setText(text)
+            self.overlay_label.setText(text or tr("progress.downloading"))
             self.overlay.setGeometry(self.centralWidget().rect())
             self.overlay.show()
             self.overlay.raise_()
@@ -1241,24 +1443,17 @@ class MainWindow(QMainWindow):
             self.overlay.hide()
 
     # -- UI actions ---------------------------------------------------
-    def _pick_dest(self) -> None:
-        folder = QFileDialog.getExistingDirectory(self, "Папка для загрузок", self.dest_edit.text())
-        if folder:
-            self.dest_edit.setText(folder)
-
     def _start_download(self) -> None:
         url = self.url_edit.text().strip()
         if not url:
-            QMessageBox.warning(self, "media-grabber", "Вставь ссылку.")
+            QMessageBox.warning(self, "media-grabber", tr("warning.need_url"))
             return
-        kind, container = FORMATS[self.format_combo.currentText()]
-        max_height = QUALITIES[self.quality_combo.currentText()]
-        dest = self.dest_edit.text().strip() or DEFAULT_DEST
-        self.state["last_dest"] = dest
-        save_state(self.state)
+        kind, container = FORMATS[self.format_combo.currentData()]
+        max_height = QUALITIES[self.quality_combo.currentData()]
+        dest = self.state.get("last_dest", DEFAULT_DEST)
 
         log.info("ui.download_clicked", url=url, kind=kind, container=container, dest=dest, max_height=max_height)
-        self._set_busy(True, "Проверяю ссылку…")
+        self._set_busy(True, tr("status.checking_link"))
 
         self._resolver = ResolveWorker(url, self.state.get("yandex_token", ""))
         self._resolver.resolved.connect(
@@ -1269,7 +1464,7 @@ class MainWindow(QMainWindow):
 
     def _on_resolve_failed(self, message: str) -> None:
         self._set_busy(False)
-        self._set_status(f"Ошибка: {message}", "err")
+        self._set_status(tr("status.error_prefix", msg=message), "err")
 
     def _on_resolved(
         self, name: str, items: list, url: str, kind: str, container: str, dest: str, max_height: int | None
@@ -1281,11 +1476,11 @@ class MainWindow(QMainWindow):
         self._set_busy(False)
         dlg = PlaylistDialog(name, items, self)
         if dlg.exec() != QDialog.Accepted:
-            self._set_status("Отменено", "err")
+            self._set_status(tr("status.cancelled"), "err")
             return
         chosen = dlg.selected_items()
         if not chosen:
-            self._set_status("Ничего не выбрано", "err")
+            self._set_status(tr("status.nothing_selected"), "err")
             return
         subfolder = re.sub(r'[\\/:*?"<>|]', "_", name).strip() or "Playlist"
         self._start_batch(chosen, kind, container, str(Path(dest) / subfolder), max_height)
@@ -1293,8 +1488,8 @@ class MainWindow(QMainWindow):
     def _begin_single(self, url: str, kind: str, container: str, dest: str, max_height: int | None) -> None:
         self._queue_total = 0
         self.progress.setValue(0)
-        self._set_status("Запуск…", "busy")
-        self._set_busy(True, "Скачивание…")
+        self._set_status(tr("status.starting"), "busy")
+        self._set_busy(True, tr("progress.downloading"))
 
         self.worker = DownloadWorker(url, kind, container, dest, max_height, self.state.get("yandex_token", ""))
         self.worker.progress.connect(self._on_progress)
@@ -1310,13 +1505,13 @@ class MainWindow(QMainWindow):
         self._queue_max_height = max_height
         self._queue_total = len(items)
         self._queue_done = 0
-        self._set_busy(True, f"Плейлист: 0/{self._queue_total}")
+        self._set_busy(True, tr("status.playlist_progress", done=0, total=self._queue_total))
         self._download_next_in_queue()
 
     def _download_next_in_queue(self) -> None:
         if not self._queue:
             self._set_busy(False)
-            self._set_status(f"Готово: плейлист ({self._queue_done}/{self._queue_total})", "ok")
+            self._set_status(tr("status.playlist_done", done=self._queue_done, total=self._queue_total), "ok")
             return
         title, ref = self._queue.pop(0)
         self.progress.setValue(0)
@@ -1376,14 +1571,14 @@ class MainWindow(QMainWindow):
 
     def _on_finished(self, result: dict, url: str, kind: str, container: str) -> None:
         self.progress.setValue(100)
-        self._set_status(f"Готово: {result['title']}", "ok")
+        self._set_status(tr("status.done_title", title=result["title"]), "ok")
         self._set_busy(False)
         self._add_history(self._ok_history_entry(result, url, container))
         self._load_into_player(result["path"], result["kind"], result["title"])
 
     def _on_failed(self, message: str, url: str, kind: str, container: str) -> None:
         self.progress.setValue(0)
-        self._set_status(f"Ошибка: {message}", "err")
+        self._set_status(tr("status.error_prefix", msg=message), "err")
         self._set_busy(False)
         self._add_history(
             {
@@ -1399,6 +1594,7 @@ class MainWindow(QMainWindow):
         )
 
     def _set_status(self, text: str, kind: str) -> None:
+        self._status_is_pristine = False
         self.status_label.setText(text)
         self.status_label.setObjectName(f"status_{kind}")
         self.status_label.setStyleSheet("")  # force re-polish of the objectName style
@@ -1406,12 +1602,16 @@ class MainWindow(QMainWindow):
     # -- preview player -------------------------------------------------
     def _load_into_player(self, path: str, kind: str, title: str) -> None:
         self.player.pause()
+        self._player_loaded = True
+        self.player_section.show()
+        self._current_player_kind = kind
+        self._current_player_title = title
         self._video_collapsed = False
         self.video_collapse_btn.setVisible(kind == "video")
-        self.video_collapse_btn.setIcon(icon("chevron-down", TOKENS[self.theme]["icon"]))
+        self.video_collapse_btn.setIcon(icon("chevron-down", TOKENS[self._effective_theme]["icon"]))
         self.video_widget.setVisible(kind == "video")
         self.player.setSource(QUrl.fromLocalFile(path))
-        self.now_playing_label.setText(f"{'🎬' if kind == 'video' else '🎵'} {title} (готово — нажми ▶)")
+        self._update_now_playing_label()
 
         entry = next((e for e in self.state.get("history", []) if e.get("path") == path), None)
         text = (entry.get("description") or entry.get("lyrics")) if entry else None
@@ -1421,13 +1621,21 @@ class MainWindow(QMainWindow):
         self.info_panel.setPlainText(self._current_media_text)
         self.info_panel.hide()
 
+    def _update_now_playing_label(self) -> None:
+        icon_char = "🎬" if self._current_player_kind == "video" else "🎵"
+        self.now_playing_label.setText(
+            tr("player.ready_to_play", icon=icon_char, title=self._current_player_title)
+        )
+
     def _toggle_info_panel(self) -> None:
         self.info_panel.setVisible(not self.info_panel.isVisible())
 
     def _save_info_panel(self) -> None:
         if not self._current_media_text:
             return
-        path, _ = QFileDialog.getSaveFileName(self, "Сохранить как…", "description.txt", "Текст (*.txt)")
+        path, _ = QFileDialog.getSaveFileName(
+            self, tr("dialog.save_as_title"), "description.txt", tr("dialog.save_as_filter")
+        )
         if path:
             Path(path).write_text(self._current_media_text, encoding="utf-8")
 
@@ -1439,7 +1647,7 @@ class MainWindow(QMainWindow):
 
     def _on_playback_state(self, state: QMediaPlayer.PlaybackState) -> None:
         name = "pause" if state == QMediaPlayer.PlayingState else "play"
-        self.play_btn.setIcon(icon(name, TOKENS[self.theme]["icon"]))
+        self.play_btn.setIcon(icon(name, TOKENS[self._effective_theme]["icon"]))
 
     def _toggle_video_collapsed(self) -> None:
         # Playback (audio track, position, seek bar) keeps working collapsed --
@@ -1447,7 +1655,7 @@ class MainWindow(QMainWindow):
         self._video_collapsed = not self._video_collapsed
         self.video_widget.setVisible(not self._video_collapsed)
         self.video_collapse_btn.setIcon(
-            icon("chevron-right" if self._video_collapsed else "chevron-down", TOKENS[self.theme]["icon"])
+            icon("chevron-right" if self._video_collapsed else "chevron-down", TOKENS[self._effective_theme]["icon"])
         )
 
     def _on_position(self, pos: int) -> None:
@@ -1463,14 +1671,16 @@ class MainWindow(QMainWindow):
         self._render_history()
 
     @staticmethod
-    def _combo_set_options(combo: QComboBox, options: list[str]) -> None:
-        """Repopulate a filter combo with "Все" + sorted values, keeping the current pick if still valid."""
+    def _combo_set_options(combo: QComboBox, options: list[str], label=str) -> None:
+        """Repopulate a filter combo with "All" + sorted values, keeping the current pick if
+        still valid. `label` maps a raw value to its displayed text (translated, for options
+        that aren't already human text -- e.g. "on_disk" -> "On disk" / "На диске")."""
         current = combo.currentData() if combo.count() else None
         combo.blockSignals(True)
         combo.clear()
-        combo.addItem("Все", "")
+        combo.addItem(tr("filter.all"), "")
         for opt in sorted(options):
-            combo.addItem(opt, opt)
+            combo.addItem(label(opt), opt)
         idx = combo.findData(current) if current else 0
         combo.setCurrentIndex(max(idx, 0))
         combo.blockSignals(False)
@@ -1480,8 +1690,42 @@ class MainWindow(QMainWindow):
         save_state(self.state)
         self._render_history()
 
+    def _open_convert_dialog(self, path: str, kind: str) -> None:
+        dlg = ConvertDialog(kind, self)
+        if dlg.exec() != QDialog.Accepted:
+            return
+        container, audio_only = dlg.target()
+
+        self._set_busy(True, tr("status.converting"), indeterminate=True)
+        self._convert_worker = ConvertWorker(path, container, audio_only)
+        self._convert_worker.finished_ok.connect(lambda r: self._on_convert_finished(r, path))
+        self._convert_worker.failed.connect(self._on_convert_failed)
+        self._convert_worker.start()
+
+    def _on_convert_finished(self, result: dict, src_path: str) -> None:
+        self._set_busy(False)
+        title = f"{Path(result['path']).stem}"
+        self._set_status(tr("status.convert_done", title=title), "ok")
+        src_entry = next((e for e in self.state.get("history", []) if e.get("path") == src_path), None)
+        self._add_history(
+            {
+                "ts": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                "url": src_entry["url"] if src_entry else src_path,
+                "title": title,
+                "kind": result["kind"],
+                "container": result["container"],
+                "site": "converted",
+                "status": "ok",
+                "path": result["path"],
+            }
+        )
+
+    def _on_convert_failed(self, message: str) -> None:
+        self._set_busy(False)
+        self._set_status(tr("status.convert_failed", msg=message), "err")
+
     def _render_history(self) -> None:
-        t = TOKENS[self.theme]
+        t = TOKENS[self._effective_theme]
         for card in self._history_cards:
             card.setParent(None)
             card.deleteLater()
@@ -1493,11 +1737,20 @@ class MainWindow(QMainWindow):
         self._combo_set_options(
             self.filter_dir, {str(Path(e["path"]).parent) for e in history if e.get("path")}
         )
+        self._combo_set_options(
+            self.filter_kind, {str(e.get("kind", "?")) for e in history},
+            label=lambda k: tr("kind.video") if k == "video" else tr("kind.audio") if k == "audio" else k,
+        )
+        self._combo_set_options(
+            self.filter_status, {entry_disk_status(e) for e in history}, label=lambda s: tr(f"disk_status.{s}")
+        )
 
         query = self._history_filter.lower() if hasattr(self, "_history_filter") else ""
         site_filter = self.filter_site.currentData() or ""
         format_filter = self.filter_format.currentData() or ""
         dir_filter = self.filter_dir.currentData() or ""
+        kind_filter = self.filter_kind.currentData() or ""
+        status_filter = self.filter_status.currentData() or ""
         insert_at = self.history_container_layout.count() - 1  # keep the trailing stretch last
         for idx, entry in enumerate(history):
             haystack = " ".join(
@@ -1511,7 +1764,11 @@ class MainWindow(QMainWindow):
                 continue
             if dir_filter and (not entry.get("path") or str(Path(entry["path"]).parent) != dir_filter):
                 continue
-            card = HistoryCard(entry, idx, t, self._load_into_player, self.history_container)
+            if kind_filter and str(entry.get("kind", "?")) != kind_filter:
+                continue
+            if status_filter and entry_disk_status(entry) != status_filter:
+                continue
+            card = HistoryCard(entry, idx, t, self._load_into_player, self._open_convert_dialog, self.history_container)
             self.history_container_layout.insertWidget(insert_at, card)
             insert_at += 1
             self._history_cards.append(card)
@@ -1519,15 +1776,15 @@ class MainWindow(QMainWindow):
     def _delete_selected_history(self) -> None:
         selected = [c for c in self._history_cards if c.checkbox.isChecked()]
         if not selected:
-            QMessageBox.information(self, "media-grabber", "Выбери хотя бы одну запись в истории.")
+            QMessageBox.information(self, "media-grabber", tr("msgbox.select_one_history"))
             return
 
         box = QMessageBox(self)
         box.setWindowTitle("media-grabber")
-        box.setText(f"Удалить {len(selected)} запись(ей) из истории?")
-        only_list_btn = box.addButton("Только из списка", QMessageBox.AcceptRole)
-        with_disk_btn = box.addButton("И с диска", QMessageBox.DestructiveRole)
-        box.addButton("Отмена", QMessageBox.RejectRole)
+        box.setText(tr("dialog.delete_confirm", n=len(selected)))
+        only_list_btn = box.addButton(tr("button.delete_list_only"), QMessageBox.AcceptRole)
+        with_disk_btn = box.addButton(tr("button.delete_with_disk"), QMessageBox.DestructiveRole)
+        box.addButton(tr("button.cancel"), QMessageBox.RejectRole)
         box.exec()
         clicked = box.clickedButton()
         if clicked not in (only_list_btn, with_disk_btn):
@@ -1544,7 +1801,7 @@ class MainWindow(QMainWindow):
                     Path(entry["path"]).unlink(missing_ok=True)
                 except OSError as e:
                     log.error("ui.history_delete_file_failed", path=entry["path"], error=str(e))
-                    QMessageBox.warning(self, "media-grabber", f"Не удалось удалить файл {entry['path']}: {e}")
+                    QMessageBox.warning(self, "media-grabber", tr("msgbox.delete_failed", path=entry["path"], err=e))
             del history[idx]
         save_state(self.state)
         self._render_history()

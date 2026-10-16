@@ -2,7 +2,7 @@
 
 [![Lint & Test](https://github.com/wwakabobik/media-grabber/actions/workflows/lint.yml/badge.svg?branch=master)](https://github.com/wwakabobik/media-grabber/actions/workflows/lint.yml)
 [![Release](https://img.shields.io/github/v/release/wwakabobik/media-grabber)](https://github.com/wwakabobik/media-grabber/releases)
-[![License: MIT](https://img.shields.io/github/license/wwakabobik/media-grabber)](LICENSE)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 ![Python](https://img.shields.io/badge/python-3.12%2B-blue)
 ![Platform](https://img.shields.io/badge/platform-macOS-lightgrey)
 [![PySide6](https://img.shields.io/badge/UI-PySide6%20(Qt)-41cd52)](https://doc.qt.io/qtforpython/)
@@ -10,6 +10,14 @@
 A small desktop app: paste a YouTube / Vimeo / SoundCloud / VK / Spotify / Yandex Music link
 (including a playlist or album), pick a format and quality, hit download, and watch or listen
 right in the window — no browser, no external player.
+
+![YouTube](https://img.shields.io/badge/-YouTube-FF0000?logo=youtube&logoColor=white)
+![Vimeo](https://img.shields.io/badge/-Vimeo-1AB7EA?logo=vimeo&logoColor=white)
+![SoundCloud](https://img.shields.io/badge/-SoundCloud-FF5500?logo=soundcloud&logoColor=white)
+![VK](https://img.shields.io/badge/-VK-0077FF?logo=vk&logoColor=white)
+![Spotify](https://img.shields.io/badge/-Spotify-1ED760?logo=spotify&logoColor=white)
+![Yandex Music](https://img.shields.io/badge/-Yandex%20Music-FFCC00?logoColor=black)
+![ffmpeg](https://img.shields.io/badge/-ffmpeg-007808?logo=ffmpeg&logoColor=white)
 
 <p align="center">
   <img src="docs/screenshot-dark.png" alt="media-grabber, dark theme" width="48%">
@@ -19,11 +27,12 @@ right in the window — no browser, no external player.
 ## Design
 
 A minimalist glass look (translucent cards, soft gradients, rounded corners, one consistent
-button style) with full light/dark themes, switchable from the header and persisted between
-runs. Icons are small hand-drawn lucide-style SVGs tinted per theme at render time — no icon
-font, no asset files. QSS can't do the OS's real frosted-glass blur (that needs native
-`NSVisualEffectView`, out of scope for a Qt app — see Known limitations), so this fakes the
-vibe with translucency and soft borders instead.
+button style) with a Light / Dark / System theme picker in the header next to Settings,
+persisted between runs; System follows the OS's own appearance live, including a change made
+while the app is open. Icons are small hand-drawn lucide-style SVGs tinted per theme at render
+time — no icon font, no asset files. QSS can't do the OS's real frosted-glass blur (that needs
+native `NSVisualEffectView`, out of scope for a Qt app — see Known limitations), so this fakes
+the vibe with translucency and soft borders instead.
 
 ## How it gets the media
 
@@ -34,7 +43,7 @@ vibe with translucency and soft borders instead.
   and pulls the matching audio from YouTube instead — Spotify is only ever used for the lookup.
 - **Yandex Music** tracks download for real (no YouTube-matching detour), but Yandex's API has no
   anonymous access like Spotify's — you need your own account's OAuth token, set once in
-  **⚙ Настройки**.
+  **Settings**.
 - **Playlists / albums / multi-track links** (YouTube playlists, SoundCloud sets, Spotify
   albums/playlists, Yandex Music albums/playlists) are detected before downloading: a picker
   dialog lists every track/video with a checkbox so you choose what actually gets downloaded,
@@ -49,19 +58,29 @@ vibe with translucency and soft borders instead.
   Spotify lyrics (via spotdl's own lyrics providers) and Yandex Music lyrics (via its own lyrics
   API) are picked up when available and viewable/exportable right from the app — see Features.
 
-Realistic format choices: **MP4 / WebM** video, **MP3** audio. AVI isn't offered — none of these
-sites serve it, so there'd be nothing to download into that container. Spotify and Yandex Music
-are audio-only — picking one of those links greys out the video option instead of letting you
-hit an error.
+Realistic *download* format choices: **MP4 / WebM** video, **MP3** audio — none of these sites
+serve anything else, so there'd be nothing to download into another container. Spotify and
+Yandex Music are audio-only — picking one of those links greys out the video option instead of
+letting you hit an error. Once a file is on disk, **Convert** (see Features) offers a much wider
+set of formats, since that's a local `ffmpeg` transcode, not a download.
 
 ## Features
 
-- URL + format dropdown (video/audio) + quality picker (Best / 1080p / 720p / 480p / 360p) +
-  destination folder, remembered between runs.
-- Progress bar and status line fed by yt-dlp's real download progress, with an overlay that
-  blocks the controls while a download is in flight.
+- URL + format dropdown (video/audio) + quality picker (Best / 1080p / 720p / 480p / 360p).
+  Destination folder, Yandex Music token and the UI language live in Settings, remembered
+  between runs.
+- **English and Russian UI**, switchable from Settings — no restart needed.
+- Search box *and* filter dropdowns (source / format / folder / type / status) above the history
+  list, combined with AND semantics — "status" is on disk / missing / error, "type" is audio/video.
+- **Convert**: turn any downloaded file into another format from its history entry — video to
+  MP4/WebM/MKV/MOV/AVI, or pull just the audio out as MP3/WAV/M4A/FLAC/OGG/AAC/Opus (never the
+  other way around) — via `ffmpeg`, saved as a separate file alongside the original, with an
+  animated progress pulse (ffmpeg doesn't report a percentage the way a download does).
+- Progress bar fed by yt-dlp's real download progress, with an overlay that blocks the controls
+  while a download is in flight — hidden the rest of the time, not stuck at a stale 0%/100%.
 - Built-in preview player ([Qt Multimedia](https://doc.qt.io/qt-6/qtmultimedia-index.html)) for
-  both video and audio — play/pause, seek — so nothing needs to be opened in another app.
+  both video and audio — play/pause, seek — so nothing needs to be opened in another app. Stays
+  out of the way (hidden) until something is actually loaded into it.
 - History with multi-select: every attempt (success or failure) is kept, with the error message
   for failed ones. Delete selected entries from the list only, or from disk as well. An entry
   whose file was removed outside the app is shown greyed out instead of crashing or lying about
@@ -75,12 +94,13 @@ hit an error.
 - **Live preview**: ~700ms after a URL settles, a background fetch shows its title, duration and
   cover art above the Download button — so you see what you're about to grab before committing,
   not just after.
-- Each history entry shows cover art, duration and the download timestamp, and expands into
-  "Открыть в плеере" / "Показать в Finder" / "Открыть ссылку" actions. A search box above the
-  list filters by title/URL/source/format live.
-- Description (YouTube/Vimeo/SoundCloud/VK) or lyrics (Spotify/Yandex Music), when available, show
-  in the history entry and next to the in-app player, with a "Сохранить как…" button to export
-  to a `.txt` file wherever you like.
+- Each history entry shows cover art, duration and the download timestamp, and expands (click
+  the chevron or anywhere on the row) into Play / Show in Finder / Convert / Open link actions.
+- Description (YouTube/Vimeo/SoundCloud/VK), lyrics (Spotify/Yandex Music) or YouTube's chapters,
+  when available, show in the history entry and next to the in-app player, with a "Save as…"
+  button to export to a `.txt` file wherever you like.
+- The video player can be collapsed back to just its controls without stopping playback, and the
+  whole window scrolls if its content doesn't fit — nothing is ever stuck unreachable.
 - Persisted to `~/.config/media-grabber/state.json`.
 - Structured logging ([structlog](https://www.structlog.org/)): human-readable in the console,
   JSON with keyword context (url, kind, path, errors...) in a rotating file at
