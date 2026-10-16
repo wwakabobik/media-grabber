@@ -1,14 +1,17 @@
 """media-grabber: paste a URL, pick a format, download, preview in-app.
 
-YouTube/Vimeo (and anything yt-dlp supports) download directly. Spotify is
-DRM-protected and can't be ripped from Spotify itself, so spotify.com links
-go through spotdl: it reads the track's metadata and downloads the matching
-audio from YouTube.
+YouTube/Vimeo/SoundCloud/VK (and anything yt-dlp supports) download directly.
+Spotify and Yandex Music are DRM-protected and can't be ripped from the
+service itself: Spotify links go through spotdl (metadata from Spotify, audio
+matched on YouTube); Yandex Music links download for real, but need your own
+account token (Settings) since Yandex has no anonymous API access. Playlist
+and album/multi-track links are resolved to a pick-list before downloading.
 """
 from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -24,10 +27,14 @@ from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
     QComboBox,
+    QDialog,
+    QDialogButtonBox,
     QFileDialog,
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QMainWindow,
     QMessageBox,
     QProgressBar,
@@ -61,8 +68,78 @@ QUALITIES = {
 }
 
 
+YANDEX_TRACK_RE = re.compile(r"music\.yandex\.\w+/album/(\d+)/track/(\d+)")
+YANDEX_ALBUM_RE = re.compile(r"music\.yandex\.\w+/album/(\d+)/?(?:[?#]|$)")
+YANDEX_PLAYLIST_RE = re.compile(r"music\.yandex\.\w+/users/([^/]+)/playlists/(\d+)")
+
+
 def is_spotify(url: str) -> bool:
     return "spotify.com" in url
+
+
+def is_yandex_music(url: str) -> bool:
+    return "music.yandex." in url or url.startswith("yandex:")
+
+
+def _yandex_track_title(track) -> str:
+    artists = ", ".join(a.name for a in track.artists) if track.artists else "Unknown"
+    return f"{artists} - {track.title}"
+
+
+_spotdl_client = None  # spotdl's SpotifyClient is a process-wide singleton; re-init raises
+
+
+def _get_spotdl_client(output_template: str):
+    global _spotdl_client
+    if _spotdl_client is None:
+        from spotdl import Spotdl
+        from spotdl.utils.config import DEFAULT_CONFIG
+
+        _spotdl_client = Spotdl(
+            client_id=DEFAULT_CONFIG["client_id"],
+            client_secret=DEFAULT_CONFIG["client_secret"],
+            downloader_settings={"output": output_template},
+        )
+    else:
+        _spotdl_client.downloader.settings["output"] = output_template
+    return _spotdl_client
+
+
+def resolve_playlist(url: str, yandex_token: str) -> list[tuple[str, str]] | None:
+    """If `url` points at a playlist/album/multi-track link, return [(title, item_url), ...]
+    so the UI can offer a pick-list. Returns None for an ordinary single-item link."""
+    if is_spotify(url):
+        client = _get_spotdl_client("{artists} - {title}.{output-ext}")
+        songs = client.search([url])
+        return [(s.display_name, s.url) for s in songs] if len(songs) > 1 else None
+
+    if is_yandex_music(url):
+        if YANDEX_TRACK_RE.search(url):
+            return None  # single track, nothing to expand
+        from yandex_music import Client
+
+        client = Client(yandex_token).init()
+        m = YANDEX_ALBUM_RE.search(url)
+        if m:
+            album = client.albums_with_tracks(m.group(1))
+            tracks = [t for volume in (album.volumes or []) for t in volume]
+        else:
+            m = YANDEX_PLAYLIST_RE.search(url)
+            if not m:
+                return None
+            playlist = client.users_playlists(m.group(2), m.group(1))
+            tracks = [ts.fetch_track() for ts in playlist.tracks] if playlist else []
+        return [(_yandex_track_title(t), f"yandex:{t.id}") for t in tracks] or None
+
+    # Generic yt-dlp sources (YouTube, Vimeo, SoundCloud, VK, ...)
+    # playlistend caps it so an accidentally-pasted channel/feed URL (thousands of videos)
+    # can't hang the resolve step or flood the picker dialog.
+    with yt_dlp.YoutubeDL({"extract_flat": True, "quiet": True, "skip_download": True, "playlistend": 200}) as ydl:
+        info = ydl.extract_info(url, download=False)
+    entries = [e for e in (info.get("entries") or []) if e]
+    if not entries:
+        return None
+    return [(e.get("title") or e.get("id"), e.get("url") or e.get("webpage_url")) for e in entries]
 
 
 def load_state() -> dict:
@@ -84,13 +161,22 @@ class DownloadWorker(QThread):
     finished_ok = Signal(dict)
     failed = Signal(str)
 
-    def __init__(self, url: str, kind: str, container: str, dest_dir: str, max_height: int | None = None):
+    def __init__(
+        self,
+        url: str,
+        kind: str,
+        container: str,
+        dest_dir: str,
+        max_height: int | None = None,
+        yandex_token: str = "",
+    ):
         super().__init__()
         self.url = url
         self.kind = kind
         self.container = container
         self.dest_dir = dest_dir
         self.max_height = max_height
+        self.yandex_token = yandex_token
 
     def run(self) -> None:
         log.info(
@@ -106,6 +192,10 @@ class DownloadWorker(QThread):
                 if self.kind == "video":
                     raise ValueError("У Spotify нет видео — выбери «Аудио (MP3)».")
                 result = self._spotdl()
+            elif is_yandex_music(self.url):
+                if self.kind == "video":
+                    raise ValueError("У Яндекс.Музыки нет видео — выбери «Аудио (MP3)».")
+                result = self._yandex()
             else:
                 result = self._ytdlp()
             log.info("download.ok", url=self.url, title=result.get("title"), path=result.get("path"))
@@ -185,17 +275,12 @@ class DownloadWorker(QThread):
     def _spotdl(self) -> dict:
         # Drive spotdl's library API in-process rather than shelling out to the "spotdl"
         # CLI command: that command only exists on PATH in the dev venv, not in the
-        # frozen .app, where there's no separate spotdl executable to find.
-        from spotdl import Spotdl
-        from spotdl.utils.config import DEFAULT_CONFIG
-
+        # frozen .app, where there's no separate spotdl executable to find. The client is
+        # a process-wide singleton (spotdl raises on a second init), so it's shared/reused
+        # across every item in a playlist batch rather than rebuilt per download.
         Path(self.dest_dir).mkdir(parents=True, exist_ok=True)
         self.progress.emit(10, "Поиск трека через Spotify…")
-        client = Spotdl(
-            client_id=DEFAULT_CONFIG["client_id"],
-            client_secret=DEFAULT_CONFIG["client_secret"],
-            downloader_settings={"output": f"{self.dest_dir}/{{artists}} - {{title}}.{{output-ext}}"},
-        )
+        client = _get_spotdl_client(f"{self.dest_dir}/{{artists}} - {{title}}.{{output-ext}}")
         songs = client.search([self.url])
         if not songs:
             log.error("spotdl.not_found", url=self.url)
@@ -207,6 +292,116 @@ class DownloadWorker(QThread):
             log.error("spotdl.download_failed", url=self.url, song=song.display_name)
             raise RuntimeError("spotdl не смог скачать трек")
         return {"title": song.display_name, "path": str(path), "kind": "audio", "site": "spotify"}
+
+    def _yandex(self) -> dict:
+        if not self.yandex_token:
+            raise ValueError("Нужен токен Яндекс.Музыки — добавь его в Настройках.")
+        from yandex_music import Client
+
+        if self.url.startswith("yandex:"):
+            track_id = self.url.split(":", 1)[1]
+        else:
+            m = YANDEX_TRACK_RE.search(self.url)
+            if not m:
+                raise ValueError("Не похоже на ссылку на трек Яндекс.Музыки.")
+            track_id = m.group(2)
+
+        self.progress.emit(10, "Получение трека с Яндекс.Музыки…")
+        client = Client(self.yandex_token).init()
+        track = client.tracks([track_id])[0]
+        title = _yandex_track_title(track)
+        log.debug("yandex.matched", url=self.url, track_id=track_id, title=title)
+
+        Path(self.dest_dir).mkdir(parents=True, exist_ok=True)
+        target = self._make_unique(Path(self.dest_dir) / f"{title}.mp3")
+        self.progress.emit(40, "Скачивание с Яндекс.Музыки…")
+        track.download(str(target))
+        return {"title": title, "path": str(target), "kind": "audio", "site": "yandex-music"}
+
+
+class ResolveWorker(QThread):
+    """Checks whether a URL is a playlist/album before the real download starts."""
+
+    resolved = Signal(list)  # [] if not a playlist, else [(title, item_url), ...]
+    failed = Signal(str)
+
+    def __init__(self, url: str, yandex_token: str):
+        super().__init__()
+        self.url = url
+        self.yandex_token = yandex_token
+
+    def run(self) -> None:
+        try:
+            items = resolve_playlist(self.url, self.yandex_token)
+            self.resolved.emit(items or [])
+        except Exception as e:  # noqa: BLE001 -- surfaced to the UI as a plain error, not fatal
+            log.error("resolve.failed", url=self.url, error=str(e))
+            self.failed.emit(str(e))
+
+
+class PlaylistDialog(QDialog):
+    def __init__(self, items: list[tuple[str, str]], parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Плейлист / альбом")
+        self.resize(480, 420)
+        self.items = items
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel(f"Найдено {len(items)} треков/видео. Выбери, что скачать:"))
+
+        self.list_widget = QListWidget()
+        for title, _ref in items:
+            item = QListWidgetItem(title)
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            item.setCheckState(Qt.Checked)
+            self.list_widget.addItem(item)
+        layout.addWidget(self.list_widget)
+
+        select_row = QHBoxLayout()
+        all_btn = QPushButton("Выбрать всё")
+        all_btn.setObjectName("secondary")
+        all_btn.clicked.connect(lambda: self._set_all(Qt.Checked))
+        none_btn = QPushButton("Снять всё")
+        none_btn.setObjectName("secondary")
+        none_btn.clicked.connect(lambda: self._set_all(Qt.Unchecked))
+        select_row.addWidget(all_btn)
+        select_row.addWidget(none_btn)
+        layout.addLayout(select_row)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _set_all(self, state) -> None:
+        for i in range(self.list_widget.count()):
+            self.list_widget.item(i).setCheckState(state)
+
+    def selected_items(self) -> list[tuple[str, str]]:
+        return [
+            self.items[i] for i in range(self.list_widget.count()) if self.list_widget.item(i).checkState() == Qt.Checked
+        ]
+
+
+class SettingsDialog(QDialog):
+    def __init__(self, yandex_token: str, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Настройки")
+        self.resize(420, 140)
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel("Токен Яндекс.Музыки (нужен для скачивания — своей учётки, без него API анонимно не отдаёт треки):"))
+        self.token_edit = QLineEdit(yandex_token)
+        self.token_edit.setPlaceholderText("OAuth-токен аккаунта Яндекс.Музыки")
+        layout.addWidget(self.token_edit)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def token(self) -> str:
+        return self.token_edit.text().strip()
 
 
 STYLE = """
@@ -251,7 +446,9 @@ class MainWindow(QMainWindow):
         # URL + format row
         row1 = QHBoxLayout()
         self.url_edit = QLineEdit()
-        self.url_edit.setPlaceholderText("Ссылка на YouTube / Vimeo / Spotify…")
+        self.url_edit.setPlaceholderText(
+            "Ссылка на YouTube / Vimeo / SoundCloud / VK / Spotify / Яндекс.Музыку… (в т.ч. плейлист/альбом)"
+        )
         self.format_combo = QComboBox()
         self.format_combo.addItems(FORMATS.keys())
         self.format_combo.currentTextChanged.connect(self._on_format_changed)
@@ -269,8 +466,12 @@ class MainWindow(QMainWindow):
         self.browse_btn = QPushButton("Папка…")
         self.browse_btn.setObjectName("secondary")
         self.browse_btn.clicked.connect(self._pick_dest)
+        self.settings_btn = QPushButton("⚙ Настройки")
+        self.settings_btn.setObjectName("secondary")
+        self.settings_btn.clicked.connect(self._open_settings)
         row2.addWidget(self.dest_edit, 3)
         row2.addWidget(self.browse_btn, 1)
+        row2.addWidget(self.settings_btn, 1)
         layout.addLayout(row2)
 
         # Download button + progress
@@ -348,26 +549,38 @@ class MainWindow(QMainWindow):
             self.quality_combo,
             self.dest_edit,
             self.browse_btn,
+            self.settings_btn,
             self.download_btn,
             self.delete_history_btn,
         ]
         self._on_format_changed(self.format_combo.currentText())
+        self._queue: list[tuple[str, str]] = []  # (title, ref_url) still to download
+        self._queue_kind = ""
+        self._queue_container = ""
+        self._queue_max_height: int | None = None
+        self._queue_total = 0
 
     def _on_format_changed(self, text: str) -> None:
         kind, _ = FORMATS[text]
         self.quality_combo.setEnabled(kind == "video")
 
     def _on_url_changed(self, text: str) -> None:
-        # Spotify is audio-only: there's no video to offer, so grey that choice out
-        # instead of letting the user pick it and then hitting an error on download.
-        spotify = is_spotify(text)
+        # Spotify/Yandex Music are audio-only: there's no video to offer, so grey that
+        # choice out instead of letting the user pick it and hit an error on download.
+        audio_only = is_spotify(text) or is_yandex_music(text)
         model = self.format_combo.model()
         for i in range(self.format_combo.count()):
             kind, _ = FORMATS[self.format_combo.itemText(i)]
-            model.item(i).setEnabled(not (spotify and kind == "video"))
-        if spotify and FORMATS[self.format_combo.currentText()][0] == "video":
+            model.item(i).setEnabled(not (audio_only and kind == "video"))
+        if audio_only and FORMATS[self.format_combo.currentText()][0] == "video":
             audio_key = next(k for k, (kind, _) in FORMATS.items() if kind == "audio")
             self.format_combo.setCurrentText(audio_key)
+
+    def _open_settings(self) -> None:
+        dlg = SettingsDialog(self.state.get("yandex_token", ""), self)
+        if dlg.exec() == QDialog.Accepted:
+            self.state["yandex_token"] = dlg.token()
+            save_state(self.state)
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
@@ -402,20 +615,112 @@ class MainWindow(QMainWindow):
         save_state(self.state)
 
         log.info("ui.download_clicked", url=url, kind=kind, container=container, dest=dest, max_height=max_height)
+        self._set_busy(True, "Проверяю ссылку…")
+
+        self._resolver = ResolveWorker(url, self.state.get("yandex_token", ""))
+        self._resolver.resolved.connect(lambda items: self._on_resolved(items, url, kind, container, dest, max_height))
+        self._resolver.failed.connect(self._on_resolve_failed)
+        self._resolver.start()
+
+    def _on_resolve_failed(self, message: str) -> None:
+        self._set_busy(False)
+        self._set_status(f"Ошибка: {message}", "err")
+
+    def _on_resolved(
+        self, items: list, url: str, kind: str, container: str, dest: str, max_height: int | None
+    ) -> None:
+        if not items:
+            self._begin_single(url, kind, container, dest, max_height)
+            return
+
+        self._set_busy(False)
+        dlg = PlaylistDialog(items, self)
+        if dlg.exec() != QDialog.Accepted:
+            self._set_status("Отменено", "err")
+            return
+        chosen = dlg.selected_items()
+        if not chosen:
+            self._set_status("Ничего не выбрано", "err")
+            return
+        self._start_batch(chosen, kind, container, dest, max_height)
+
+    def _begin_single(self, url: str, kind: str, container: str, dest: str, max_height: int | None) -> None:
+        self._queue_total = 0
         self.progress.setValue(0)
         self._set_status("Запуск…", "busy")
         self._set_busy(True, "Скачивание…")
 
-        self.worker = DownloadWorker(url, kind, container, dest, max_height)
+        self.worker = DownloadWorker(url, kind, container, dest, max_height, self.state.get("yandex_token", ""))
         self.worker.progress.connect(self._on_progress)
         self.worker.finished_ok.connect(lambda r: self._on_finished(r, url, kind, container))
         self.worker.failed.connect(lambda e: self._on_failed(e, url, kind, container))
         self.worker.start()
 
+    def _start_batch(self, items: list[tuple[str, str]], kind: str, container: str, dest: str, max_height) -> None:
+        self._queue = list(items)
+        self._queue_kind = kind
+        self._queue_container = container
+        self._queue_dest = dest
+        self._queue_max_height = max_height
+        self._queue_total = len(items)
+        self._queue_done = 0
+        self._set_busy(True, f"Плейлист: 0/{self._queue_total}")
+        self._download_next_in_queue()
+
+    def _download_next_in_queue(self) -> None:
+        if not self._queue:
+            self._set_busy(False)
+            self._set_status(f"Готово: плейлист ({self._queue_done}/{self._queue_total})", "ok")
+            return
+        title, ref = self._queue.pop(0)
+        self.progress.setValue(0)
+        self.worker = DownloadWorker(
+            ref, self._queue_kind, self._queue_container, self._queue_dest, self._queue_max_height,
+            self.state.get("yandex_token", ""),
+        )
+        self.worker.progress.connect(self._on_progress)
+        self.worker.finished_ok.connect(lambda r: self._on_queue_item_finished(r, ref, title))
+        self.worker.failed.connect(lambda e: self._on_queue_item_failed(e, ref, title))
+        self.worker.start()
+
+    def _on_queue_item_finished(self, result: dict, url: str, title: str) -> None:
+        self._queue_done += 1
+        self._add_history(
+            {
+                "ts": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                "url": url,
+                "title": result["title"],
+                "kind": result["kind"],
+                "container": self._queue_container,
+                "site": result["site"],
+                "status": "ok",
+                "path": result["path"],
+            }
+        )
+        self._download_next_in_queue()
+
+    def _on_queue_item_failed(self, message: str, url: str, title: str) -> None:
+        self._queue_done += 1
+        self._add_history(
+            {
+                "ts": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                "url": url,
+                "title": title or url,
+                "kind": self._queue_kind,
+                "container": self._queue_container,
+                "site": "yt-dlp",
+                "status": "error",
+                "error": message,
+            }
+        )
+        self._download_next_in_queue()
+
     def _on_progress(self, pct: int, text: str) -> None:
+        prefix = f"[{self._queue_done + 1}/{self._queue_total}] " if self._queue_total else ""
+        full_text = f"{prefix}{text}"
         self.progress.setValue(pct)
-        self._set_status(text, "busy")
-        self.overlay_label.setText(f"{text} {pct}%" if pct else text)
+        self._set_status(full_text, "busy")
+        self.overlay_label.setText(f"{full_text} {pct}%" if pct else full_text)
 
     def _on_finished(self, result: dict, url: str, kind: str, container: str) -> None:
         self.progress.setValue(100)
@@ -446,7 +751,7 @@ class MainWindow(QMainWindow):
                 "title": url,
                 "kind": kind,
                 "container": container,
-                "site": "spotify" if is_spotify(url) else "yt-dlp",
+                "site": "yandex-music" if is_yandex_music(url) else ("spotify" if is_spotify(url) else "yt-dlp"),
                 "status": "error",
                 "error": message,
             }
