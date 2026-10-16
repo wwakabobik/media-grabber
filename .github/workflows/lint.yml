@@ -27,5 +27,12 @@ jobs:
       - name: ruff
         run: uv run ruff check .
 
+      - name: Install Qt runtime libs
+        # main.py imports PySide6.QtGui/QtWidgets at module load time (no display needed,
+        # but the shared libs below must be present for the import itself to succeed).
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libegl1 libopengl0 libxkbcommon0 libxcb-cursor0
+
       - name: pytest
         run: uv run pytest -q
