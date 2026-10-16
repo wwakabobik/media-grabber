@@ -75,6 +75,8 @@ QUALITIES = {
     "360p": 360,
 }
 
+THEME_OPTIONS = ["light", "dark", "system"]
+
 
 YANDEX_TRACK_RE = re.compile(r"music\.yandex\.\w+/album/(\d+)/track/(\d+)")
 YANDEX_ALBUM_RE = re.compile(r"music\.yandex\.\w+/album/(\d+)/?(?:[?#]|$)")
@@ -257,12 +259,20 @@ def make_unique_path(path: Path) -> Path:
         n += 1
 
 
+def entry_disk_status(entry: dict) -> str:
+    """"on_disk" (downloaded and still there), "missing" (downloaded, file
+    gone since -- deleted outside the app) or "error" (download itself failed)."""
+    if entry.get("status") != "ok":
+        return "error"
+    return "on_disk" if Path(entry.get("path", "")).exists() else "missing"
+
+
 # Audio-only containers a file can be converted to. Video can additionally
 # convert to another video container (CONVERT_VIDEO_TARGETS) or have its
 # audio extracted into one of these -- never the other way around (no app
 # here can synthesize video from audio).
-CONVERT_AUDIO_TARGETS = ["mp3", "wav", "m4a", "flac", "ogg"]
-CONVERT_VIDEO_TARGETS = ["mp4", "webm", "mkv"]
+CONVERT_AUDIO_TARGETS = ["mp3", "wav", "m4a", "flac", "ogg", "aac", "opus"]
+CONVERT_VIDEO_TARGETS = ["mp4", "webm", "mkv", "mov", "avi"]
 
 
 class ConvertWorker(QThread):
@@ -826,8 +836,9 @@ class HistoryCard(QWidget):
         t = theme_tokens
 
         kind_word = tr("kind.video") if entry.get("kind") == "video" else tr("kind.audio")
-        self.on_disk = entry.get("status") == "ok" and Path(entry.get("path", "")).exists()
-        missing = entry.get("status") == "ok" and not self.on_disk
+        disk_status = entry_disk_status(entry)
+        self.on_disk = disk_status == "on_disk"
+        missing = disk_status == "missing"
         if self.on_disk:
             status_icon, status_color = "check", t["success"]
         elif missing:
@@ -977,7 +988,9 @@ class MainWindow(QMainWindow):
         self.resize(820, 700)
         self.state = load_state()
         self.worker: DownloadWorker | None = None
-        self.theme = self.state.get("theme", "dark")
+        self.theme = self.state.get("theme", "system")
+        self._effective_theme = "dark"
+        QApplication.instance().styleHints().colorSchemeChanged.connect(self._on_system_theme_changed)
         set_language(self.state.get("language", "en"))
 
         # The whole window content sits inside a scroll area, not directly on
@@ -997,16 +1010,22 @@ class MainWindow(QMainWindow):
         layout.setSpacing(12)
         layout.setContentsMargins(18, 16, 18, 16)
 
-        # Header: title + theme switch
+        # Header: title + theme switch + settings
         header = QHBoxLayout()
         title_label = QLabel("media-grabber")
         title_label.setObjectName("heading")
         header.addWidget(title_label)
         header.addStretch()
-        self.theme_btn = QPushButton()
-        self.theme_btn.setObjectName("iconBtn")
-        self.theme_btn.clicked.connect(self._toggle_theme)
-        header.addWidget(self.theme_btn)
+        self.theme_combo = QComboBox()
+        for key in THEME_OPTIONS:
+            self.theme_combo.addItem(tr(f"theme.{key}"), key)
+        self.theme_combo.setCurrentIndex(self.theme_combo.findData(self.theme))
+        self.theme_combo.currentIndexChanged.connect(self._on_theme_changed)
+        header.addWidget(self.theme_combo)
+        self.settings_btn = QPushButton()
+        self.settings_btn.setObjectName("secondary")
+        self.settings_btn.clicked.connect(self._open_settings)
+        header.addWidget(self.settings_btn)
         layout.addLayout(header)
 
         # URL + format row
@@ -1054,18 +1073,6 @@ class MainWindow(QMainWindow):
         self._preview_timer.timeout.connect(self._start_preview)
         self._preview_worker: PreviewWorker | None = None
         self._preview_generation = 0
-
-        # Settings row -- the destination folder used to live here as its own
-        # input; it's a set-once-and-forget preference, not something anyone
-        # edits per download, so it moved into the Settings dialog instead of
-        # permanently taking up a row on the main window.
-        row2 = QHBoxLayout()
-        row2.addStretch()
-        self.settings_btn = QPushButton()
-        self.settings_btn.setObjectName("secondary")
-        self.settings_btn.clicked.connect(self._open_settings)
-        row2.addWidget(self.settings_btn)
-        layout.addLayout(row2)
 
         # Download button + progress
         self.download_btn = QPushButton()
@@ -1138,7 +1145,7 @@ class MainWindow(QMainWindow):
         info_header.addWidget(self.info_toggle_btn)
         self.info_save_btn = QPushButton()
         self.info_save_btn.setObjectName("secondary")
-        self.info_save_btn.setIcon(icon("download", TOKENS[self.theme]["icon"]))
+        self.info_save_btn.setIcon(icon("download", TOKENS[self._effective_theme]["icon"]))
         self.info_save_btn.clicked.connect(self._save_info_panel)
         self.info_save_btn.hide()
         info_header.addWidget(self.info_save_btn)
@@ -1194,6 +1201,19 @@ class MainWindow(QMainWindow):
         filters_row.addWidget(self.filter_folder_label)
         filters_row.addWidget(self.filter_dir, 1)
         layout.addLayout(filters_row)
+
+        filters_row2 = QHBoxLayout()
+        self.filter_kind = QComboBox()
+        self.filter_kind.currentIndexChanged.connect(self._on_history_filters_changed)
+        self.filter_kind_label = QLabel()
+        filters_row2.addWidget(self.filter_kind_label)
+        filters_row2.addWidget(self.filter_kind, 1)
+        self.filter_status = QComboBox()
+        self.filter_status.currentIndexChanged.connect(self._on_history_filters_changed)
+        self.filter_status_label = QLabel()
+        filters_row2.addWidget(self.filter_status_label)
+        filters_row2.addWidget(self.filter_status, 1)
+        layout.addLayout(filters_row2)
 
         # A scroll area of card widgets, not a QTreeWidget: word-wrapped multi-line
         # content inside QTreeWidgetItem rows doesn't get sized correctly by Qt once
@@ -1316,27 +1336,43 @@ class MainWindow(QMainWindow):
         if url:
             QDesktopServices.openUrl(QUrl(url))
 
-    def _toggle_theme(self) -> None:
-        self.theme = "light" if self.theme == "dark" else "dark"
+    def _resolve_effective_theme(self) -> str:
+        if self.theme != "system":
+            return self.theme
+        scheme = QApplication.instance().styleHints().colorScheme()
+        return "light" if scheme == Qt.ColorScheme.Light else "dark"
+
+    def _on_theme_changed(self, _index: int) -> None:
+        self.theme = self.theme_combo.currentData()
         self.state["theme"] = self.theme
         save_state(self.state)
         self._apply_theme()
         self._render_history()
 
+    def _on_system_theme_changed(self, _scheme) -> None:
+        # Only matters while following the OS -- an explicit light/dark pick
+        # is never overridden by the OS changing underneath it.
+        if self.theme == "system":
+            self._apply_theme()
+            self._render_history()
+
     def _apply_theme(self) -> None:
-        t = TOKENS[self.theme]
-        QApplication.instance().setStyleSheet(stylesheet(self.theme))
-        self.theme_btn.setIcon(icon("sun" if self.theme == "dark" else "moon", t["icon"]))
+        self._effective_theme = self._resolve_effective_theme()
+        t = TOKENS[self._effective_theme]
+        QApplication.instance().setStyleSheet(stylesheet(self._effective_theme))
         self.open_browser_btn.setIcon(icon("globe", t["icon"]))
         self.play_btn.setIcon(icon("pause" if self._is_playing() else "play", t["icon"]))
         self.video_collapse_btn.setIcon(icon("chevron-right" if self._video_collapsed else "chevron-down", t["icon"]))
         self.settings_btn.setIcon(icon("settings", t["icon"]))
         self.delete_history_btn.setIcon(icon("trash", t["icon"]))
         self.download_btn.setIcon(icon("download", t["accent_text"]))
-        self.overlay.setStyleSheet(f"background-color: {('rgba(10, 10, 15, 200)' if self.theme == 'dark' else 'rgba(255, 255, 255, 215)')};")
+        self.overlay.setStyleSheet(
+            f"background-color: {('rgba(10, 10, 15, 200)' if self._effective_theme == 'dark' else 'rgba(255, 255, 255, 215)')};"
+        )
 
     def _retranslate_ui(self) -> None:
-        self.theme_btn.setToolTip(tr("tooltip.theme_toggle"))
+        for key in THEME_OPTIONS:
+            self.theme_combo.setItemText(self.theme_combo.findData(key), tr(f"theme.{key}"))
         self.url_edit.setPlaceholderText(tr("url.placeholder"))
         self.open_browser_btn.setToolTip(tr("tooltip.open_in_browser"))
         self.settings_btn.setText(tr("button.settings"))
@@ -1352,6 +1388,8 @@ class MainWindow(QMainWindow):
         self.filter_source_label.setText(tr("filter.source_label"))
         self.filter_format_label.setText(tr("filter.format_label"))
         self.filter_folder_label.setText(tr("filter.folder_label"))
+        self.filter_kind_label.setText(tr("filter.kind_label"))
+        self.filter_status_label.setText(tr("filter.status_label"))
         for key in FORMATS:
             self.format_combo.setItemText(self.format_combo.findData(key), tr(f"format.{key}"))
         best_idx = self.quality_combo.findData("best")
@@ -1570,7 +1608,7 @@ class MainWindow(QMainWindow):
         self._current_player_title = title
         self._video_collapsed = False
         self.video_collapse_btn.setVisible(kind == "video")
-        self.video_collapse_btn.setIcon(icon("chevron-down", TOKENS[self.theme]["icon"]))
+        self.video_collapse_btn.setIcon(icon("chevron-down", TOKENS[self._effective_theme]["icon"]))
         self.video_widget.setVisible(kind == "video")
         self.player.setSource(QUrl.fromLocalFile(path))
         self._update_now_playing_label()
@@ -1609,7 +1647,7 @@ class MainWindow(QMainWindow):
 
     def _on_playback_state(self, state: QMediaPlayer.PlaybackState) -> None:
         name = "pause" if state == QMediaPlayer.PlayingState else "play"
-        self.play_btn.setIcon(icon(name, TOKENS[self.theme]["icon"]))
+        self.play_btn.setIcon(icon(name, TOKENS[self._effective_theme]["icon"]))
 
     def _toggle_video_collapsed(self) -> None:
         # Playback (audio track, position, seek bar) keeps working collapsed --
@@ -1617,7 +1655,7 @@ class MainWindow(QMainWindow):
         self._video_collapsed = not self._video_collapsed
         self.video_widget.setVisible(not self._video_collapsed)
         self.video_collapse_btn.setIcon(
-            icon("chevron-right" if self._video_collapsed else "chevron-down", TOKENS[self.theme]["icon"])
+            icon("chevron-right" if self._video_collapsed else "chevron-down", TOKENS[self._effective_theme]["icon"])
         )
 
     def _on_position(self, pos: int) -> None:
@@ -1633,14 +1671,16 @@ class MainWindow(QMainWindow):
         self._render_history()
 
     @staticmethod
-    def _combo_set_options(combo: QComboBox, options: list[str]) -> None:
-        """Repopulate a filter combo with "Все" + sorted values, keeping the current pick if still valid."""
+    def _combo_set_options(combo: QComboBox, options: list[str], label=str) -> None:
+        """Repopulate a filter combo with "All" + sorted values, keeping the current pick if
+        still valid. `label` maps a raw value to its displayed text (translated, for options
+        that aren't already human text -- e.g. "on_disk" -> "On disk" / "На диске")."""
         current = combo.currentData() if combo.count() else None
         combo.blockSignals(True)
         combo.clear()
         combo.addItem(tr("filter.all"), "")
         for opt in sorted(options):
-            combo.addItem(opt, opt)
+            combo.addItem(label(opt), opt)
         idx = combo.findData(current) if current else 0
         combo.setCurrentIndex(max(idx, 0))
         combo.blockSignals(False)
@@ -1685,7 +1725,7 @@ class MainWindow(QMainWindow):
         self._set_status(tr("status.convert_failed", msg=message), "err")
 
     def _render_history(self) -> None:
-        t = TOKENS[self.theme]
+        t = TOKENS[self._effective_theme]
         for card in self._history_cards:
             card.setParent(None)
             card.deleteLater()
@@ -1697,11 +1737,20 @@ class MainWindow(QMainWindow):
         self._combo_set_options(
             self.filter_dir, {str(Path(e["path"]).parent) for e in history if e.get("path")}
         )
+        self._combo_set_options(
+            self.filter_kind, {str(e.get("kind", "?")) for e in history},
+            label=lambda k: tr("kind.video") if k == "video" else tr("kind.audio") if k == "audio" else k,
+        )
+        self._combo_set_options(
+            self.filter_status, {entry_disk_status(e) for e in history}, label=lambda s: tr(f"disk_status.{s}")
+        )
 
         query = self._history_filter.lower() if hasattr(self, "_history_filter") else ""
         site_filter = self.filter_site.currentData() or ""
         format_filter = self.filter_format.currentData() or ""
         dir_filter = self.filter_dir.currentData() or ""
+        kind_filter = self.filter_kind.currentData() or ""
+        status_filter = self.filter_status.currentData() or ""
         insert_at = self.history_container_layout.count() - 1  # keep the trailing stretch last
         for idx, entry in enumerate(history):
             haystack = " ".join(
@@ -1714,6 +1763,10 @@ class MainWindow(QMainWindow):
             if format_filter and str(entry.get("container", "?")) != format_filter:
                 continue
             if dir_filter and (not entry.get("path") or str(Path(entry["path"]).parent) != dir_filter):
+                continue
+            if kind_filter and str(entry.get("kind", "?")) != kind_filter:
+                continue
+            if status_filter and entry_disk_status(entry) != status_filter:
                 continue
             card = HistoryCard(entry, idx, t, self._load_into_player, self._open_convert_dialog, self.history_container)
             self.history_container_layout.insertWidget(insert_at, card)

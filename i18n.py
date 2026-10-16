@@ -13,6 +13,9 @@ STRINGS: dict[str, dict[str, str]] = {
     "format.video_webm": {"en": "Video (WebM)", "ru": "Видео (WebM)"},
     "format.audio_mp3": {"en": "Audio (MP3)", "ru": "Аудио (MP3)"},
     "quality.best": {"en": "Best", "ru": "Лучшее"},
+    "theme.light": {"en": "Light", "ru": "Светлая"},
+    "theme.dark": {"en": "Dark", "ru": "Тёмная"},
+    "theme.system": {"en": "System", "ru": "Системная"},
     "chapters.header": {"en": "Chapters:", "ru": "Главы:"},
     "error.vimeo_login_wall": {
         "en": "Vimeo requires a login even for this video -- yt-dlp can't download it without a "
@@ -105,6 +108,11 @@ STRINGS: dict[str, dict[str, str]] = {
     "filter.source_label": {"en": "Source:", "ru": "Источник:"},
     "filter.format_label": {"en": "Format:", "ru": "Формат:"},
     "filter.folder_label": {"en": "Folder:", "ru": "Папка:"},
+    "filter.kind_label": {"en": "Type:", "ru": "Тип:"},
+    "filter.status_label": {"en": "Status:", "ru": "Статус:"},
+    "disk_status.on_disk": {"en": "On disk", "ru": "На диске"},
+    "disk_status.missing": {"en": "Missing", "ru": "Удалён с диска"},
+    "disk_status.error": {"en": "Error", "ru": "Ошибка"},
     "filter.all": {"en": "All", "ru": "Все"},
     "dialog.close_confirm": {
         "en": "A download is in progress. Close the app and cancel it?",

@@ -11,6 +11,7 @@ from main import (
     MainWindow,
     PlaylistDialog,
     SettingsDialog,
+    entry_disk_status,
 )
 from theme import TOKENS
 
@@ -432,3 +433,79 @@ def test_main_window_convert_failed_shows_error_status(qtbot):
     qtbot.addWidget(win)
     win._on_convert_failed("ffmpeg exploded")
     assert "ffmpeg exploded" in win.status_label.text()
+
+
+def test_entry_disk_status(tmp_path):
+    f = tmp_path / "track.mp3"
+    f.write_bytes(b"x")
+    assert entry_disk_status({"status": "ok", "path": str(f)}) == "on_disk"
+    assert entry_disk_status({"status": "ok", "path": str(tmp_path / "gone.mp3")}) == "missing"
+    assert entry_disk_status({"status": "error"}) == "error"
+
+
+def test_main_window_theme_combo_has_three_options_and_picks_up_saved_choice(qtbot):
+    win = MainWindow()
+    qtbot.addWidget(win)
+    assert [win.theme_combo.itemData(i) for i in range(win.theme_combo.count())] == ["light", "dark", "system"]
+    win.theme = "dark"
+    win.state["theme"] = "dark"
+
+
+def test_main_window_on_theme_changed_persists_and_applies(qtbot):
+    win = MainWindow()
+    qtbot.addWidget(win)
+    with patch("main.save_state") as mocked_save:
+        win.theme_combo.setCurrentIndex(win.theme_combo.findData("light"))  # known baseline
+        mocked_save.reset_mock()
+        win.theme_combo.setCurrentIndex(win.theme_combo.findData("dark"))
+        assert win.theme == "dark"
+        assert win._effective_theme == "dark"
+        mocked_save.assert_called_once_with(win.state)
+
+
+def test_main_window_system_theme_follows_os_until_an_explicit_choice_is_made(qtbot):
+    win = MainWindow()
+    qtbot.addWidget(win)
+    win.theme = "system"
+    with patch.object(win, "_resolve_effective_theme", return_value="dark"):
+        win._apply_theme()
+        assert win._effective_theme == "dark"
+        win._on_system_theme_changed(None)  # OS changed while following it -> re-applied
+        assert win._effective_theme == "dark"
+
+    win.theme = "light"  # an explicit pick
+    with patch.object(win, "_apply_theme") as mocked_apply:
+        win._on_system_theme_changed(None)  # OS changing must not override an explicit pick
+        mocked_apply.assert_not_called()
+
+
+def test_main_window_history_filters_by_kind_and_status(qtbot, tmp_path):
+    present = tmp_path / "present.mp3"
+    present.write_bytes(b"x")
+    win = MainWindow()
+    qtbot.addWidget(win)
+    win.state["history"] = [
+        {"ts": "now", "url": "https://a", "title": "A", "kind": "audio",
+         "container": "mp3", "site": "yt-dlp", "status": "ok", "path": str(present)},
+        {"ts": "now", "url": "https://b", "title": "B", "kind": "video",
+         "container": "mp4", "site": "yt-dlp", "status": "ok", "path": str(tmp_path / "gone.mp4")},
+        {"ts": "now", "url": "https://c", "title": "C", "kind": "audio",
+         "container": "mp3", "site": "yt-dlp", "status": "error", "error": "boom"},
+    ]
+    win._render_history()
+    assert len(win._history_cards) == 3
+
+    win.filter_kind.setCurrentIndex(win.filter_kind.findData("video"))
+    assert [c.entry["title"] for c in win._history_cards] == ["B"]
+
+    win.filter_kind.setCurrentIndex(win.filter_kind.findData(""))
+    win.filter_status.setCurrentIndex(win.filter_status.findData("missing"))
+    assert [c.entry["title"] for c in win._history_cards] == ["B"]
+
+    win.filter_status.setCurrentIndex(win.filter_status.findData("error"))
+    assert [c.entry["title"] for c in win._history_cards] == ["C"]
+
+
+def test_convert_targets_cover_the_expected_formats():
+    assert set(CONVERT_AUDIO_TARGETS) >= {"mp3", "wav", "m4a", "flac", "ogg", "aac", "opus"}
+    assert set(CONVERT_VIDEO_TARGETS) >= {"mp4", "webm", "mkv", "mov", "avi"}
