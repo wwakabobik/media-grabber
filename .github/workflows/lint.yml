@@ -1,11 +1,9 @@
 name: Lint & Test
 
-# Runs on every push to any branch except master (master is only ever
-# reached via a reviewed, already-green PR merge).
+# Runs on every push, including merges into master -- the README badge reads
+# the master run, and master only ever gets a push via an already-green PR merge.
 on:
   push:
-    branches-ignore:
-      - master
 
 jobs:
   lint-and-test:
