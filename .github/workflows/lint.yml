@@ -32,7 +32,8 @@ jobs:
         # but the shared libs below must be present for the import itself to succeed).
         run: |
           sudo apt-get update
-          sudo apt-get install -y libegl1 libopengl0 libxkbcommon0 libxcb-cursor0
+          sudo apt-get install -y libegl1 libopengl0 libxkbcommon0 libxcb-cursor0 \
+            libpulse0 libnss3 libxcomposite1 libxrandr2 libxtst6 libasound2t64
 
       - name: pytest
         run: uv run pytest -q
