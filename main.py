@@ -975,10 +975,23 @@ class MainWindow(QMainWindow):
         self.play_btn.clicked.connect(self._toggle_play)
         self.seek_slider = QSlider(Qt.Horizontal)
         self.seek_slider.sliderMoved.connect(self.player.setPosition)
+        # The video frame (260px min height) plus everything else above it can
+        # exceed the window's height with nothing to shrink -- history_scroll's
+        # stretch area had no floor, so it could get squeezed to nothing with no
+        # way to reach it. Letting video collapse back to just its controls
+        # fixes the common case directly; history_scroll's own minimum height
+        # (set below) is the floor for whatever's still too tall after that.
+        self._video_collapsed = False
+        self.video_collapse_btn = QPushButton()
+        self.video_collapse_btn.setObjectName("iconBtn")
+        self.video_collapse_btn.setToolTip("Свернуть/развернуть видео")
+        self.video_collapse_btn.clicked.connect(self._toggle_video_collapsed)
+        self.video_collapse_btn.hide()
         self.now_playing_label = QLabel("")
         self.now_playing_label.setObjectName("dim")
         controls.addWidget(self.play_btn)
         controls.addWidget(self.seek_slider, 3)
+        controls.addWidget(self.video_collapse_btn)
         layout.addLayout(controls)
         layout.addWidget(self.now_playing_label)
 
@@ -1051,6 +1064,10 @@ class MainWindow(QMainWindow):
         self.history_scroll = QScrollArea()
         self.history_scroll.setWidgetResizable(True)
         self.history_scroll.setFrameShape(QScrollArea.NoFrame)
+        # A floor so this never gets squeezed to nothing when the video player
+        # and everything above it don't fit the window -- without this, it had
+        # no minimum of its own and could shrink to an unreachable sliver.
+        self.history_scroll.setMinimumHeight(180)
         self.history_container = QWidget()
         self.history_container_layout = QVBoxLayout(self.history_container)
         self.history_container_layout.setSpacing(8)
@@ -1163,6 +1180,7 @@ class MainWindow(QMainWindow):
         self.theme_btn.setIcon(icon("sun" if self.theme == "dark" else "moon", t["icon"]))
         self.open_browser_btn.setIcon(icon("globe", t["icon"]))
         self.play_btn.setIcon(icon("pause" if self._is_playing() else "play", t["icon"]))
+        self.video_collapse_btn.setIcon(icon("chevron-right" if self._video_collapsed else "chevron-down", t["icon"]))
         self.browse_btn.setIcon(icon("folder", t["icon"]))
         self.settings_btn.setIcon(icon("settings", t["icon"]))
         self.delete_history_btn.setIcon(icon("trash", t["icon"]))
@@ -1374,6 +1392,9 @@ class MainWindow(QMainWindow):
     # -- preview player -------------------------------------------------
     def _load_into_player(self, path: str, kind: str, title: str) -> None:
         self.player.pause()
+        self._video_collapsed = False
+        self.video_collapse_btn.setVisible(kind == "video")
+        self.video_collapse_btn.setIcon(icon("chevron-down", TOKENS[self.theme]["icon"]))
         self.video_widget.setVisible(kind == "video")
         self.player.setSource(QUrl.fromLocalFile(path))
         self.now_playing_label.setText(f"{'🎬' if kind == 'video' else '🎵'} {title} (готово — нажми ▶)")
@@ -1405,6 +1426,15 @@ class MainWindow(QMainWindow):
     def _on_playback_state(self, state: QMediaPlayer.PlaybackState) -> None:
         name = "pause" if state == QMediaPlayer.PlayingState else "play"
         self.play_btn.setIcon(icon(name, TOKENS[self.theme]["icon"]))
+
+    def _toggle_video_collapsed(self) -> None:
+        # Playback (audio track, position, seek bar) keeps working collapsed --
+        # this only hides the big video frame to free up vertical space.
+        self._video_collapsed = not self._video_collapsed
+        self.video_widget.setVisible(not self._video_collapsed)
+        self.video_collapse_btn.setIcon(
+            icon("chevron-right" if self._video_collapsed else "chevron-down", TOKENS[self.theme]["icon"])
+        )
 
     def _on_position(self, pos: int) -> None:
         if not self.seek_slider.isSliderDown():

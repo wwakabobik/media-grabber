@@ -233,6 +233,41 @@ def test_main_window_close_event_blocks_on_running_download_unless_confirmed(qtb
         win.worker = None  # otherwise qtbot's teardown close() re-triggers a real, unpatched dialog
 
 
+def test_main_window_video_collapse_toggle_hides_video_widget(qtbot, tmp_path):
+    f = tmp_path / "clip.mp4"
+    f.write_bytes(b"x")
+    win = MainWindow()
+    qtbot.addWidget(win)
+    win._load_into_player(str(f), "video", "A Clip")
+    assert win.video_collapse_btn.isHidden() is False
+    assert win.video_widget.isHidden() is False
+
+    win._toggle_video_collapsed()
+    assert win.video_widget.isHidden() is True
+
+    win._toggle_video_collapsed()
+    assert win.video_widget.isHidden() is False
+
+
+def test_main_window_loading_audio_hides_video_collapse_button(qtbot, tmp_path):
+    f = tmp_path / "track.mp3"
+    f.write_bytes(b"x")
+    win = MainWindow()
+    qtbot.addWidget(win)
+    win._load_into_player(str(f), "audio", "A Track")
+    assert win.video_collapse_btn.isHidden() is True
+    assert win.video_widget.isHidden() is True
+
+
+def test_main_window_history_scroll_has_a_minimum_height_floor(qtbot):
+    win = MainWindow()
+    qtbot.addWidget(win)
+    # Without a floor, the video player (260px min) plus everything above it
+    # could squeeze this to near-zero with no way to reach it -- regression
+    # test for that, not a claim about the exact pixel value.
+    assert win.history_scroll.minimumHeight() >= 150
+
+
 def test_main_window_save_info_panel_writes_file(qtbot, tmp_path):
     win = MainWindow()
     qtbot.addWidget(win)
