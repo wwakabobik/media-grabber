@@ -56,8 +56,15 @@ hit an error.
 
 ## Features
 
-- URL + format dropdown (video/audio) + quality picker (Best / 1080p / 720p / 480p / 360p) +
-  destination folder, remembered between runs.
+- URL + format dropdown (video/audio) + quality picker (Best / 1080p / 720p / 480p / 360p).
+  Destination folder, Yandex Music token and the UI language live in Settings, remembered
+  between runs.
+- **English and Russian UI**, switchable from Settings — no restart needed.
+- Search box *and* filter dropdowns (source / format / folder) above the history list, combined
+  with AND semantics.
+- **Convert**: turn any downloaded file into another format from its history entry — including
+  pulling just the audio out of a video (never the other way around) — via `ffmpeg`, saved as a
+  separate file alongside the original.
 - Progress bar and status line fed by yt-dlp's real download progress, with an overlay that
   blocks the controls while a download is in flight.
 - Built-in preview player ([Qt Multimedia](https://doc.qt.io/qt-6/qtmultimedia-index.html)) for
@@ -75,12 +82,13 @@ hit an error.
 - **Live preview**: ~700ms after a URL settles, a background fetch shows its title, duration and
   cover art above the Download button — so you see what you're about to grab before committing,
   not just after.
-- Each history entry shows cover art, duration and the download timestamp, and expands into
-  "Открыть в плеере" / "Показать в Finder" / "Открыть ссылку" actions. A search box above the
-  list filters by title/URL/source/format live.
-- Description (YouTube/Vimeo/SoundCloud/VK) or lyrics (Spotify/Yandex Music), when available, show
-  in the history entry and next to the in-app player, with a "Сохранить как…" button to export
-  to a `.txt` file wherever you like.
+- Each history entry shows cover art, duration and the download timestamp, and expands (click
+  the chevron or anywhere on the row) into Play / Show in Finder / Convert / Open link actions.
+- Description (YouTube/Vimeo/SoundCloud/VK), lyrics (Spotify/Yandex Music) or YouTube's chapters,
+  when available, show in the history entry and next to the in-app player, with a "Save as…"
+  button to export to a `.txt` file wherever you like.
+- The video player can be collapsed back to just its controls without stopping playback, and the
+  whole window scrolls if its content doesn't fit — nothing is ever stuck unreachable.
 - Persisted to `~/.config/media-grabber/state.json`.
 - Structured logging ([structlog](https://www.structlog.org/)): human-readable in the console,
   JSON with keyword context (url, kind, path, errors...) in a rotating file at

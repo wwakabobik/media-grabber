@@ -3,7 +3,15 @@ from unittest.mock import patch
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QLabel, QMessageBox, QScrollArea
 
-from main import HistoryCard, MainWindow, PlaylistDialog, SettingsDialog
+from main import (
+    CONVERT_AUDIO_TARGETS,
+    CONVERT_VIDEO_TARGETS,
+    ConvertDialog,
+    HistoryCard,
+    MainWindow,
+    PlaylistDialog,
+    SettingsDialog,
+)
 from theme import TOKENS
 
 
@@ -125,10 +133,10 @@ def test_history_card_shows_chapters_with_description(qtbot, tmp_path):
     assert card.extra_box is not None
     text = card.extra_box.toPlainText()
     assert "hello world" in text
-    assert "Главы:" in text
+    assert "Chapters:" in text
     assert "0:00  Intro" in text
     detail_text = card.detail_widget.findChild(QLabel, "dim").text()
-    assert "Главы: 2" in detail_text
+    assert "Chapters: 2" in detail_text
 
 
 def test_history_card_error_entry_has_no_extra_box(qtbot):
@@ -157,11 +165,20 @@ def test_playlist_dialog_select_all_and_none(qtbot):
 
 
 def test_settings_dialog_round_trips_token(qtbot):
-    dlg = SettingsDialog("abc123")
+    dlg = SettingsDialog("abc123", "/tmp/dest", "en")
     qtbot.addWidget(dlg)
     assert dlg.token_edit.text() == "abc123"
     dlg.token_edit.setText("  new-token  ")
     assert dlg.token() == "new-token"
+
+
+def test_settings_dialog_round_trips_dest_and_language(qtbot):
+    dlg = SettingsDialog("", "/tmp/dest", "en")
+    qtbot.addWidget(dlg)
+    assert dlg.dest() == "/tmp/dest"
+    assert dlg.language() == "en"
+    dlg.language_combo.setCurrentIndex(dlg.language_combo.findData("ru"))
+    assert dlg.language() == "ru"
 
 
 def test_main_window_history_search_filters_by_title(qtbot):
@@ -303,3 +320,115 @@ def test_main_window_save_info_panel_noop_without_text(qtbot, tmp_path):
     with patch("main.QFileDialog.getSaveFileName", return_value=(str(target), "")):
         win._save_info_panel()
     assert not target.exists()
+
+
+def test_main_window_progress_bar_hidden_except_while_busy(qtbot):
+    win = MainWindow()
+    qtbot.addWidget(win)
+    assert win.progress.isHidden() is True  # nothing done yet
+
+    win._set_busy(True)
+    assert win.progress.isHidden() is False
+
+    win._set_busy(False)
+    assert win.progress.isHidden() is True  # back to hidden once finished, not stuck at 100%
+
+
+def test_main_window_convert_uses_indeterminate_progress_pulse(qtbot):
+    # ffmpeg conversion has no percentage to report (unlike downloads), so it
+    # gets the QProgressBar's built-in animated "busy" pulse: range(0, 0).
+    win = MainWindow()
+    qtbot.addWidget(win)
+    win._set_busy(True, indeterminate=True)
+    assert win.progress.minimum() == 0
+    assert win.progress.maximum() == 0
+
+    win._set_busy(False)
+    assert win.progress.maximum() == 100  # back to a normal determinate bar
+
+    win._set_busy(True)  # a regular download: determinate, reports a real percentage
+    assert win.progress.maximum() == 100
+
+
+def test_main_window_player_section_hidden_until_something_is_loaded(qtbot, tmp_path):
+    win = MainWindow()
+    qtbot.addWidget(win)
+    assert win.player_section.isHidden() is True  # no old song/video open, nothing downloaded yet
+
+    f = tmp_path / "track.mp3"
+    f.write_bytes(b"x")
+    win._load_into_player(str(f), "audio", "A Track")
+    assert win.player_section.isHidden() is False
+
+
+def test_main_window_retranslate_ui_switches_button_text(qtbot):
+    win = MainWindow()
+    qtbot.addWidget(win)
+    assert win.download_btn.text() == "Download"
+
+    import i18n
+
+    i18n.set_language("ru")
+    try:
+        win._retranslate_ui()
+        assert win.download_btn.text() == "Скачать"
+    finally:
+        i18n.set_language("en")
+        win._retranslate_ui()
+
+
+def test_main_window_status_ready_only_shown_pristine(qtbot):
+    win = MainWindow()
+    qtbot.addWidget(win)
+    assert win.status_label.text() == "Ready"
+
+    win._set_status("Done: thing", "ok")
+    import i18n
+
+    i18n.set_language("ru")
+    try:
+        win._retranslate_ui()
+        assert win.status_label.text() == "Done: thing"  # a real status is never overwritten back to "ready"
+    finally:
+        i18n.set_language("en")
+
+
+def test_convert_dialog_audio_source_offers_only_audio_targets(qtbot):
+    dlg = ConvertDialog("audio")
+    qtbot.addWidget(dlg)
+    assert dlg.targets == [(c, False) for c in CONVERT_AUDIO_TARGETS]
+
+
+def test_convert_dialog_video_source_offers_video_and_audio_extraction(qtbot):
+    dlg = ConvertDialog("video")
+    qtbot.addWidget(dlg)
+    assert dlg.targets == [(c, False) for c in CONVERT_VIDEO_TARGETS] + [(c, True) for c in CONVERT_AUDIO_TARGETS]
+    dlg.target_combo.setCurrentIndex(len(CONVERT_VIDEO_TARGETS))  # first audio-extraction entry
+    assert dlg.target() == (CONVERT_AUDIO_TARGETS[0], True)
+
+
+def test_main_window_convert_finished_adds_history_entry(qtbot, tmp_path):
+    win = MainWindow()
+    qtbot.addWidget(win)
+    src = tmp_path / "clip.mp4"
+    src.write_bytes(b"x")
+    converted = tmp_path / "clip (converted).mp3"
+    converted.write_bytes(b"x")
+    win.state["history"] = [
+        {"ts": "now", "url": "https://x", "title": "Clip", "kind": "video", "container": "mp4",
+         "site": "yt-dlp", "status": "ok", "path": str(src)},
+    ]
+
+    with patch("main.save_state"):
+        win._on_convert_finished({"path": str(converted), "kind": "audio", "container": "mp3"}, str(src))
+
+    assert win.state["history"][0]["path"] == str(converted)
+    assert win.state["history"][0]["site"] == "converted"
+    assert win.state["history"][0]["url"] == "https://x"  # inherited from the source entry
+
+
+def test_main_window_convert_failed_shows_error_status(qtbot):
+    win = MainWindow()
+    qtbot.addWidget(win)
+    win._on_convert_failed("ffmpeg exploded")
+    assert "ffmpeg exploded" in win.status_label.text()

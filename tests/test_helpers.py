@@ -42,7 +42,7 @@ def test_format_chapters_handles_zero_start_time():
     # format_duration(0) does (that's by-design for missing media info, not
     # a real timestamp).
     chapters = [{"start_time": 0, "title": "Intro"}, {"start_time": 65, "title": "Part 2"}]
-    assert format_chapters(chapters) == "Главы:\n0:00  Intro\n1:05  Part 2"
+    assert format_chapters(chapters) == "Chapters:\n0:00  Intro\n1:05  Part 2"
 
 
 def test_format_chapters_empty_or_none():
@@ -95,7 +95,7 @@ def test_friendly_error_translates_vimeo_login_wall():
         "https://vimeo.com/148751763",
         "ERROR: [vimeo] 148751763: The web client only works when logged-in. Use --cookies...",
     )
-    assert "ограничение самого Vimeo" in msg
+    assert "Vimeo limitation" in msg
 
 
 def test_friendly_error_passes_through_other_messages():
