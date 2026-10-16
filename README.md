@@ -81,11 +81,14 @@ set of formats, since that's a local `ffmpeg` transcode, not a download.
 - Built-in preview player ([Qt Multimedia](https://doc.qt.io/qt-6/qtmultimedia-index.html)) for
   both video and audio — play/pause, seek — so nothing needs to be opened in another app. Stays
   out of the way (hidden) until something is actually loaded into it.
-- History with multi-select: every attempt (success or failure) is kept, with the error message
-  for failed ones. Delete selected entries from the list only, or from disk as well. An entry
-  whose file was removed outside the app is shown greyed out instead of crashing or lying about
-  its status. A repeat download of the same title never overwrites the previous file — it gets
-  a `(1)`, `(2)`, ... suffix, like a browser's download manager.
+- History with multi-select, plus "Select all" / "Clear selection" scoped to whatever the
+  current search/filters are showing — not the whole history — so e.g. filtering by status
+  "Missing" then selecting all is the bulk-cleanup path for files deleted outside the app. Every
+  attempt (success or failure) is kept, with the error message for failed ones. Delete selected
+  entries from the list only, or from disk as well. An entry whose file was removed outside the
+  app is shown greyed out instead of crashing or lying about its status. A repeat download of
+  the same title never overwrites the previous file — it gets a `(1)`, `(2)`, ... suffix, like a
+  browser's download manager.
 - **🌐 Open in browser**: open the pasted link, or any history entry's original link, in your
   default browser without leaving the app.
 - Playlist/album links open a checkbox picker instead of downloading blind; picked items queue
@@ -104,7 +107,10 @@ set of formats, since that's a local `ffmpeg` transcode, not a download.
 - Persisted to `~/.config/media-grabber/state.json`.
 - Structured logging ([structlog](https://www.structlog.org/)): human-readable in the console,
   JSON with keyword context (url, kind, path, errors...) in a rotating file at
-  `~/.config/media-grabber/logs/media-grabber.log` (5 MB x 5 backups).
+  `~/.config/media-grabber/logs/media-grabber.log`. Max size per file and how many old ones to
+  keep are configurable from Settings (default 5 MB x 5 backups) and take effect immediately,
+  no restart; a button right there opens the log file directly, for a quick look at what
+  actually happened without digging through `~/.config`.
 
 ## Known limitations
 

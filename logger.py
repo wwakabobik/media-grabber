@@ -49,7 +49,21 @@ class FileFilter(logging.Filter):
         return True
 
 
-def setup_logging(log_level: str = "DEBUG") -> None:
+DEFAULT_LOG_MAX_MB = 5
+DEFAULT_LOG_BACKUP_COUNT = 5
+
+
+def apply_log_rotation_settings(max_mb: int, backup_count: int) -> None:
+    """Updates the already-installed RotatingFileHandler in place -- these are
+    plain attributes on the handler, safe to change at runtime, so a Settings
+    change takes effect on the next rollover without restarting the app."""
+    for handler in logging.getLogger().handlers:
+        if isinstance(handler, RotatingFileHandler):
+            handler.maxBytes = max_mb * 1024 * 1024
+            handler.backupCount = backup_count
+
+
+def setup_logging(log_level: str = "DEBUG", max_mb: int = DEFAULT_LOG_MAX_MB, backup_count: int = DEFAULT_LOG_BACKUP_COUNT) -> None:
     timestamper = TimeStamper(fmt="iso")
 
     shared_processors: list[Processor] = [
@@ -80,7 +94,9 @@ def setup_logging(log_level: str = "DEBUG") -> None:
 
     LOG_DIR.mkdir(parents=True, exist_ok=True)
 
-    file_handler = RotatingFileHandler(LOG_FILE, maxBytes=5 * 1024 * 1024, backupCount=5, encoding="utf-8")
+    file_handler = RotatingFileHandler(
+        LOG_FILE, maxBytes=max_mb * 1024 * 1024, backupCount=backup_count, encoding="utf-8"
+    )
     file_handler.setFormatter(file_formatter)
     file_handler.setLevel(logging.DEBUG)
     file_handler.addFilter(FileFilter(LOG_LEVELS))
