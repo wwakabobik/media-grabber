@@ -632,23 +632,26 @@ class HistoryCard(QWidget):
         super().__init__(parent)
         self.entry = entry
         self.idx = idx
+        self.theme_tokens = theme_tokens
+        self.load_into_player_cb = load_into_player_cb
         self.setObjectName("card")
+        self.extra_box: QTextEdit | None = None
+        self._populated = False
         t = theme_tokens
 
         kind_word = "видео" if entry.get("kind") == "video" else "аудио"
-        on_disk = entry.get("status") == "ok" and Path(entry.get("path", "")).exists()
-        missing = entry.get("status") == "ok" and not on_disk
-        if on_disk:
+        self.on_disk = entry.get("status") == "ok" and Path(entry.get("path", "")).exists()
+        missing = entry.get("status") == "ok" and not self.on_disk
+        if self.on_disk:
             status_icon, status_color = "check", t["success"]
         elif missing:
             status_icon, status_color = "trash", t["text_dim"]
         else:
             status_icon, status_color = "alert", t["danger"]
-        media = read_media_info(entry["path"]) if on_disk else {}
 
-        outer = QVBoxLayout(self)
-        outer.setContentsMargins(12, 10, 12, 10)
-        outer.setSpacing(8)
+        self.outer = QVBoxLayout(self)
+        self.outer.setContentsMargins(12, 10, 12, 10)
+        self.outer.setSpacing(8)
 
         header = QHBoxLayout()
         header.setSpacing(10)
@@ -656,7 +659,6 @@ class HistoryCard(QWidget):
         header.addWidget(self.checkbox)
         status_label = QLabel()
         status_label.setPixmap(icon(status_icon, status_color).pixmap(18, 18))
-        status_label.setFixedWidth(22)
         header.addWidget(status_label)
         title_label = QLabel(f"{entry['title']}  —  {kind_word}  —  {entry['ts']}")
         title_label.setWordWrap(True)
@@ -668,7 +670,30 @@ class HistoryCard(QWidget):
         self.toggle_btn.setIcon(icon("chevron-right", t["icon"]))
         self.toggle_btn.clicked.connect(self._toggle)
         header.addWidget(self.toggle_btn)
-        outer.addLayout(header)
+        self.outer.addLayout(header)
+
+        # The expanded detail (cover art, duration, description/lyrics, action
+        # buttons) is built lazily on first expand, not here: read_media_info()
+        # does real file I/O (mutagen) per entry, and doing that for every card
+        # up front made the whole window take seconds to appear with a sizeable
+        # history -- noticeable, blocking, and for cards the user may never open.
+        self.detail_widget: QWidget | None = None
+        self.actions_widget: QWidget | None = None
+
+    def _toggle(self) -> None:
+        if not self._populated:
+            self._populate()
+            self._populated = True
+        expanded = not self.detail_widget.isVisible()
+        self.detail_widget.setVisible(expanded)
+        self.actions_widget.setVisible(expanded)
+        if self.extra_box:
+            self.extra_box.setVisible(expanded)
+
+    def _populate(self) -> None:
+        entry, t = self.entry, self.theme_tokens
+        missing = entry.get("status") == "ok" and not self.on_disk
+        media = read_media_info(entry["path"]) if self.on_disk else {}
 
         self.detail_widget = QWidget()
         detail_layout = QHBoxLayout(self.detail_widget)
@@ -704,27 +729,26 @@ class HistoryCard(QWidget):
         text_label.setWordWrap(True)
         text_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         detail_layout.addWidget(text_label, 1)
-        outer.addWidget(self.detail_widget)
+        self.outer.addWidget(self.detail_widget)
 
         extra_text = entry.get("description") or entry.get("lyrics")
-        self.extra_box = None
         if extra_text:
             self.extra_box = QTextEdit()
             self.extra_box.setReadOnly(True)
             self.extra_box.setMaximumHeight(100)
             self.extra_box.setPlainText(extra_text)
-            outer.addWidget(self.extra_box)
+            self.outer.addWidget(self.extra_box)
 
         self.actions_widget = QWidget()
         actions_layout = QHBoxLayout(self.actions_widget)
         actions_layout.setContentsMargins(0, 4, 0, 0)
         actions_layout.setSpacing(8)
-        if on_disk:
+        if self.on_disk:
             play_btn = QPushButton(" Открыть в плеере")
             play_btn.setObjectName("secondary")
             play_btn.setIcon(icon("play", t["icon"]))
             path, kind, title = entry["path"], entry["kind"], entry["title"]
-            play_btn.clicked.connect(lambda _=None: load_into_player_cb(path, kind, title))
+            play_btn.clicked.connect(lambda _=None: self.load_into_player_cb(path, kind, title))
             actions_layout.addWidget(play_btn)
 
             finder_btn = QPushButton(" Показать в Finder")
@@ -739,19 +763,7 @@ class HistoryCard(QWidget):
         link_btn.clicked.connect(lambda _=None, u=entry_url: QDesktopServices.openUrl(QUrl(u)))
         actions_layout.addWidget(link_btn)
         actions_layout.addStretch()
-        outer.addWidget(self.actions_widget)
-
-        self.detail_widget.setVisible(False)
-        self.actions_widget.setVisible(False)
-        if self.extra_box:
-            self.extra_box.setVisible(False)
-
-    def _toggle(self) -> None:
-        expanded = not self.detail_widget.isVisible()
-        self.detail_widget.setVisible(expanded)
-        self.actions_widget.setVisible(expanded)
-        if self.extra_box:
-            self.extra_box.setVisible(expanded)
+        self.outer.addWidget(self.actions_widget)
 
 
 class MainWindow(QMainWindow):
@@ -928,6 +940,21 @@ class MainWindow(QMainWindow):
         self.history_search.textChanged.connect(self._on_history_search)
         layout.addWidget(self.history_search)
 
+        filters_row = QHBoxLayout()
+        self.filter_site = QComboBox()
+        self.filter_site.currentIndexChanged.connect(self._on_history_filters_changed)
+        filters_row.addWidget(QLabel("Источник:"))
+        filters_row.addWidget(self.filter_site, 1)
+        self.filter_format = QComboBox()
+        self.filter_format.currentIndexChanged.connect(self._on_history_filters_changed)
+        filters_row.addWidget(QLabel("Формат:"))
+        filters_row.addWidget(self.filter_format, 1)
+        self.filter_dir = QComboBox()
+        self.filter_dir.currentIndexChanged.connect(self._on_history_filters_changed)
+        filters_row.addWidget(QLabel("Папка:"))
+        filters_row.addWidget(self.filter_dir, 1)
+        layout.addLayout(filters_row)
+
         # A scroll area of card widgets, not a QTreeWidget: word-wrapped multi-line
         # content inside QTreeWidgetItem rows doesn't get sized correctly by Qt once
         # the real column width is known, which clipped text and overlapped the action
@@ -1060,6 +1087,27 @@ class MainWindow(QMainWindow):
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
         self.overlay.setGeometry(self.centralWidget().rect())
+
+    def closeEvent(self, event) -> None:
+        # Closing while a worker QThread is still running (mid-download, mid-resolve)
+        # would otherwise destroy a running thread -- Qt logs "QThread: Destroyed
+        # while thread is still running" and can crash, plus it can leave a
+        # half-written file on disk. There's no cooperative cancel (yt-dlp/spotdl's
+        # download call is a blocking call inside run()), so ask before terminating.
+        running = [w for w in (self.worker, getattr(self, "_resolver", None)) if w and w.isRunning()]
+        if running:
+            box = QMessageBox(self)
+            box.setWindowTitle("media-grabber")
+            box.setText("Идёт скачивание. Закрыть приложение и прервать его?")
+            box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+            box.setDefaultButton(QMessageBox.No)
+            if box.exec() != QMessageBox.Yes:
+                event.ignore()
+                return
+            for w in running:
+                w.terminate()
+                w.wait(2000)
+        event.accept()
 
     def _set_busy(self, busy: bool, text: str = "Скачивание…") -> None:
         for w in self._inputs:
@@ -1279,6 +1327,22 @@ class MainWindow(QMainWindow):
         self._history_filter = text.strip()
         self._render_history()
 
+    def _on_history_filters_changed(self) -> None:
+        self._render_history()
+
+    @staticmethod
+    def _combo_set_options(combo: QComboBox, options: list[str]) -> None:
+        """Repopulate a filter combo with "Все" + sorted values, keeping the current pick if still valid."""
+        current = combo.currentData() if combo.count() else None
+        combo.blockSignals(True)
+        combo.clear()
+        combo.addItem("Все", "")
+        for opt in sorted(options):
+            combo.addItem(opt, opt)
+        idx = combo.findData(current) if current else 0
+        combo.setCurrentIndex(max(idx, 0))
+        combo.blockSignals(False)
+
     def _add_history(self, entry: dict) -> None:
         self.state.setdefault("history", []).insert(0, entry)
         save_state(self.state)
@@ -1291,13 +1355,29 @@ class MainWindow(QMainWindow):
             card.deleteLater()
         self._history_cards = []
 
+        history = self.state.get("history", [])
+        self._combo_set_options(self.filter_site, {str(e.get("site", "?")) for e in history})
+        self._combo_set_options(self.filter_format, {str(e.get("container", "?")) for e in history})
+        self._combo_set_options(
+            self.filter_dir, {str(Path(e["path"]).parent) for e in history if e.get("path")}
+        )
+
         query = self._history_filter.lower() if hasattr(self, "_history_filter") else ""
+        site_filter = self.filter_site.currentData() or ""
+        format_filter = self.filter_format.currentData() or ""
+        dir_filter = self.filter_dir.currentData() or ""
         insert_at = self.history_container_layout.count() - 1  # keep the trailing stretch last
-        for idx, entry in enumerate(self.state.get("history", [])):
+        for idx, entry in enumerate(history):
             haystack = " ".join(
                 str(entry.get(k, "")) for k in ("title", "url", "site", "container", "kind")
             ).lower()
             if query and query not in haystack:
+                continue
+            if site_filter and str(entry.get("site", "?")) != site_filter:
+                continue
+            if format_filter and str(entry.get("container", "?")) != format_filter:
+                continue
+            if dir_filter and (not entry.get("path") or str(Path(entry["path"]).parent) != dir_filter):
                 continue
             card = HistoryCard(entry, idx, t, self._load_into_player, self.history_container)
             self.history_container_layout.insertWidget(insert_at, card)
