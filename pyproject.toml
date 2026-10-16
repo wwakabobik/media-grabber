@@ -8,3 +8,8 @@ dependencies = [
     "yt-dlp>=2024.12.0",
     "spotdl>=4.2.0",
 ]
+
+[dependency-groups]
+dev = [
+    "pyinstaller>=6.22.3",
+]

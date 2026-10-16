@@ -8,10 +8,13 @@ audio from YouTube.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
+
+os.environ.setdefault("QT_MAC_WANTS_LAYER", "1")  # frozen/signed .app: video widget renders black without this
 
 import yt_dlp
 from PySide6.QtCore import QThread, QUrl, Qt, Signal
@@ -44,6 +47,14 @@ FORMATS = {
     "Аудио (MP3)": ("audio", "mp3"),
 }
 
+QUALITIES = {
+    "Лучшее": None,
+    "1080p": 1080,
+    "720p": 720,
+    "480p": 480,
+    "360p": 360,
+}
+
 
 def is_spotify(url: str) -> bool:
     return "spotify.com" in url
@@ -68,12 +79,13 @@ class DownloadWorker(QThread):
     finished_ok = Signal(dict)
     failed = Signal(str)
 
-    def __init__(self, url: str, kind: str, container: str, dest_dir: str):
+    def __init__(self, url: str, kind: str, container: str, dest_dir: str, max_height: int | None = None):
         super().__init__()
         self.url = url
         self.kind = kind
         self.container = container
         self.dest_dir = dest_dir
+        self.max_height = max_height
 
     def run(self) -> None:
         try:
@@ -102,12 +114,18 @@ class DownloadWorker(QThread):
             "outtmpl": f"{self.dest_dir}/%(title)s.%(ext)s",
             "noplaylist": True,
             "progress_hooks": [self._hook],
+            "overwrites": True,  # otherwise yt-dlp reuses a stale file of the same name as-is
         }
         if self.kind == "audio":
             opts["format"] = "bestaudio/best"
             opts["postprocessors"] = [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3"}]
         else:
-            opts["format"] = "bestvideo+bestaudio/best"
+            # Prefer H.264: Qt Multimedia's bundled ffmpeg can't hw-decode AV1/VP9 on
+            # this platform, which yt-dlp's plain "bestvideo" would otherwise pick.
+            h = f"[height<={self.max_height}]" if self.max_height else ""
+            opts["format"] = (
+                f"bestvideo{h}[vcodec^=avc1]+bestaudio/best{h}[vcodec^=avc1]/bestvideo{h}+bestaudio/best{h}"
+            )
             opts["merge_output_format"] = self.container
 
         with yt_dlp.YoutubeDL(opts) as ydl:
@@ -186,18 +204,22 @@ class MainWindow(QMainWindow):
         self.url_edit.setPlaceholderText("Ссылка на YouTube / Vimeo / Spotify…")
         self.format_combo = QComboBox()
         self.format_combo.addItems(FORMATS.keys())
+        self.format_combo.currentTextChanged.connect(self._on_format_changed)
+        self.quality_combo = QComboBox()
+        self.quality_combo.addItems(QUALITIES.keys())
         row1.addWidget(self.url_edit, 3)
         row1.addWidget(self.format_combo, 1)
+        row1.addWidget(self.quality_combo, 1)
         layout.addLayout(row1)
 
         # Destination row
         row2 = QHBoxLayout()
         self.dest_edit = QLineEdit(self.state.get("last_dest", DEFAULT_DEST))
-        browse_btn = QPushButton("Папка…")
-        browse_btn.setObjectName("secondary")
-        browse_btn.clicked.connect(self._pick_dest)
+        self.browse_btn = QPushButton("Папка…")
+        self.browse_btn.setObjectName("secondary")
+        self.browse_btn.clicked.connect(self._pick_dest)
         row2.addWidget(self.dest_edit, 3)
-        row2.addWidget(browse_btn, 1)
+        row2.addWidget(self.browse_btn, 1)
         layout.addLayout(row2)
 
         # Download button + progress
@@ -248,6 +270,47 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.history_tree, 2)
         self._render_history()
 
+        # Overlay shown during a download, blocking input controls
+        self.overlay = QWidget(root)
+        self.overlay.setStyleSheet("background-color: rgba(10, 10, 15, 190);")
+        overlay_layout = QVBoxLayout(self.overlay)
+        self.overlay_label = QLabel("Скачивание…")
+        self.overlay_label.setAlignment(Qt.AlignCenter)
+        self.overlay_label.setStyleSheet("color: #e6e6f0; font-size: 18px; font-weight: 600; background: transparent;")
+        overlay_layout.addStretch()
+        overlay_layout.addWidget(self.overlay_label)
+        overlay_layout.addStretch()
+        self.overlay.hide()
+
+        self._inputs = [
+            self.url_edit,
+            self.format_combo,
+            self.quality_combo,
+            self.dest_edit,
+            self.browse_btn,
+            self.download_btn,
+        ]
+        self._on_format_changed(self.format_combo.currentText())
+
+    def _on_format_changed(self, text: str) -> None:
+        kind, _ = FORMATS[text]
+        self.quality_combo.setEnabled(kind == "video")
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self.overlay.setGeometry(self.centralWidget().rect())
+
+    def _set_busy(self, busy: bool, text: str = "Скачивание…") -> None:
+        for w in self._inputs:
+            w.setEnabled(not busy)
+        if busy:
+            self.overlay_label.setText(text)
+            self.overlay.setGeometry(self.centralWidget().rect())
+            self.overlay.show()
+            self.overlay.raise_()
+        else:
+            self.overlay.hide()
+
     # -- UI actions ---------------------------------------------------
     def _pick_dest(self) -> None:
         folder = QFileDialog.getExistingDirectory(self, "Папка для загрузок", self.dest_edit.text())
@@ -260,15 +323,16 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "media-grabber", "Вставь ссылку.")
             return
         kind, container = FORMATS[self.format_combo.currentText()]
+        max_height = QUALITIES[self.quality_combo.currentText()]
         dest = self.dest_edit.text().strip() or DEFAULT_DEST
         self.state["last_dest"] = dest
         save_state(self.state)
 
-        self.download_btn.setEnabled(False)
         self.progress.setValue(0)
         self._set_status("Запуск…", "busy")
+        self._set_busy(True, "Скачивание…")
 
-        self.worker = DownloadWorker(url, kind, container, dest)
+        self.worker = DownloadWorker(url, kind, container, dest, max_height)
         self.worker.progress.connect(self._on_progress)
         self.worker.finished_ok.connect(lambda r: self._on_finished(r, url, kind, container))
         self.worker.failed.connect(lambda e: self._on_failed(e, url, kind, container))
@@ -277,11 +341,12 @@ class MainWindow(QMainWindow):
     def _on_progress(self, pct: int, text: str) -> None:
         self.progress.setValue(pct)
         self._set_status(text, "busy")
+        self.overlay_label.setText(f"{text} {pct}%" if pct else text)
 
     def _on_finished(self, result: dict, url: str, kind: str, container: str) -> None:
         self.progress.setValue(100)
         self._set_status(f"Готово: {result['title']}", "ok")
-        self.download_btn.setEnabled(True)
+        self._set_busy(False)
         self._add_history(
             {
                 "ts": datetime.now().strftime("%Y-%m-%d %H:%M"),
@@ -299,7 +364,7 @@ class MainWindow(QMainWindow):
     def _on_failed(self, message: str, url: str, kind: str, container: str) -> None:
         self.progress.setValue(0)
         self._set_status(f"Ошибка: {message}", "err")
-        self.download_btn.setEnabled(True)
+        self._set_busy(False)
         self._add_history(
             {
                 "ts": datetime.now().strftime("%Y-%m-%d %H:%M"),
@@ -320,10 +385,10 @@ class MainWindow(QMainWindow):
 
     # -- preview player -------------------------------------------------
     def _load_into_player(self, path: str, kind: str, title: str) -> None:
+        self.player.pause()
         self.video_widget.setVisible(kind == "video")
         self.player.setSource(QUrl.fromLocalFile(path))
-        self.now_playing_label.setText(f"{'🎬' if kind == 'video' else '🎵'} {title}")
-        self.player.play()
+        self.now_playing_label.setText(f"{'🎬' if kind == 'video' else '🎵'} {title} (готово — нажми ▶)")
 
     def _toggle_play(self) -> None:
         if self.player.playbackState() == QMediaPlayer.PlayingState:
