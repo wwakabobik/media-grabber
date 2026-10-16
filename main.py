@@ -1321,6 +1321,16 @@ class MainWindow(QMainWindow):
         self._render_history()
         self.history_body.hide()
 
+        # Absorbs whatever vertical space the visible widgets above don't need --
+        # without it, a QVBoxLayout with no stretch distributes leftover space
+        # (there's plenty once history/player default to hidden, or the outer
+        # scroll area stretches root to fill a tall viewport) among whichever
+        # widgets *can* grow, which blew the live-preview card's title label up
+        # to 150+ px tall instead of one normal line. Reproduced in isolation
+        # with a minimal QVBoxLayout containing only that one card and no
+        # trailing stretch -- confirmed fixed by adding exactly this.
+        layout.addStretch(1)
+
         # Overlay shown during a download, blocking input controls
         self.overlay = QWidget(root)
         overlay_layout = QVBoxLayout(self.overlay)

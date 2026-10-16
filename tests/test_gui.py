@@ -431,6 +431,24 @@ def test_main_window_editing_url_hides_a_live_preview(qtbot, tmp_path):
     assert win.preview_card.isHidden() is True
 
 
+def test_main_window_preview_card_does_not_balloon_in_height(qtbot):
+    # Regression: with history/player collapsed by default, the main layout had
+    # leftover vertical space and no trailing stretch to absorb it, so Qt
+    # redistributed it into the live-preview title label -- 150+ px tall for
+    # one line of text, pushing the cover/duration far below it. Reproduced in
+    # isolation with a minimal QVBoxLayout before finding this exact fix.
+    win = MainWindow()
+    qtbot.addWidget(win)
+    win.show()
+    win._on_preview_ready(
+        {"title": "Dabeull - INDASTUDIO (Give Me The Fonk)", "duration": 111, "cover": None},
+        win._preview_generation,
+    )
+    qtbot.wait(10)
+    assert win.preview_title.height() < 40
+    assert win.preview_card.height() < 100
+
+
 def test_main_window_retranslate_ui_switches_button_text(qtbot):
     import i18n
 
