@@ -176,6 +176,22 @@ def format_duration(seconds: float | None) -> str:
     return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
 
 
+def format_chapters(chapters: list[dict] | None) -> str | None:
+    """YouTube's auto/uploader chapters -- timestamped key moments. Can't reuse
+    format_duration(): a chapter legitimately starts at 0, but format_duration
+    treats 0 as "unknown" and prints "?" (by design, for missing media info)."""
+    if not chapters:
+        return None
+
+    def _timestamp(seconds) -> str:
+        m, s = divmod(int(seconds or 0), 60)
+        h, m = divmod(m, 60)
+        return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
+
+    lines = [f"{_timestamp(c.get('start_time'))}  {c.get('title', '?')}" for c in chapters]
+    return "Главы:\n" + "\n".join(lines)
+
+
 def clean_description(text: str | None) -> str | None:
     """SoundCloud (and some others) hand back raw HTML in the description field;
     everyone else already gives plain text, where this is a no-op."""
@@ -386,6 +402,9 @@ class DownloadWorker(QThread):
             "site": "yt-dlp",
             "description": clean_description(info.get("description")),
             "subtitle_files": subtitle_files,
+            # YouTube's auto/uploader chapters -- timestamped key moments, the
+            # closest thing yt-dlp exposes to YouTube's "AI summary" chapter list.
+            "chapters": info.get("chapters") or [],
         }
 
     def _fetch_subtitles(self, stem: str) -> list[str]:
@@ -754,6 +773,8 @@ class HistoryCard(QWidget):
             detail_lines.append(f"Файл: {entry.get('path', '?')}")
             if entry.get("subtitle_files"):
                 detail_lines.append(f"Субтитры: {len(entry['subtitle_files'])} файл(ов) рядом с видео")
+            if entry.get("chapters"):
+                detail_lines.append(f"Главы: {len(entry['chapters'])}")
             if missing:
                 detail_lines.append("(файл удалён с диска)")
         else:
@@ -765,7 +786,8 @@ class HistoryCard(QWidget):
         detail_layout.addWidget(text_label, 1)
         self.outer.addWidget(self.detail_widget)
 
-        extra_text = entry.get("description") or entry.get("lyrics")
+        extra_parts = [entry.get("description") or entry.get("lyrics"), format_chapters(entry.get("chapters"))]
+        extra_text = "\n\n".join(p for p in extra_parts if p) or None
         if extra_text:
             self.extra_box = QTextEdit()
             self.extra_box.setReadOnly(True)
@@ -1255,7 +1277,7 @@ class MainWindow(QMainWindow):
             "status": "ok",
             "path": result["path"],
         }
-        for key in ("description", "lyrics", "subtitle_files"):
+        for key in ("description", "lyrics", "subtitle_files", "chapters"):
             if result.get(key):
                 entry[key] = result[key]
         return entry

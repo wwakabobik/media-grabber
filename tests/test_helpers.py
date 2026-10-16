@@ -5,6 +5,7 @@ from main import (
     YANDEX_PLAYLIST_RE,
     YANDEX_TRACK_RE,
     clean_description,
+    format_chapters,
     format_duration,
     friendly_error,
     is_yandex_music,
@@ -34,6 +35,19 @@ def test_format_duration():
     assert format_duration(5) == "0:05"
     assert format_duration(65) == "1:05"
     assert format_duration(3665) == "1:01:05"
+
+
+def test_format_chapters_handles_zero_start_time():
+    # A chapter legitimately starts at 0 -- must not render as "?" the way
+    # format_duration(0) does (that's by-design for missing media info, not
+    # a real timestamp).
+    chapters = [{"start_time": 0, "title": "Intro"}, {"start_time": 65, "title": "Part 2"}]
+    assert format_chapters(chapters) == "Главы:\n0:00  Intro\n1:05  Part 2"
+
+
+def test_format_chapters_empty_or_none():
+    assert format_chapters(None) is None
+    assert format_chapters([]) is None
 
 
 def test_is_yandex_music():

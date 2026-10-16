@@ -1,7 +1,7 @@
 from unittest.mock import patch
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QMessageBox
+from PySide6.QtWidgets import QLabel, QMessageBox
 
 from main import HistoryCard, MainWindow, PlaylistDialog, SettingsDialog
 from theme import TOKENS
@@ -75,6 +75,26 @@ def test_history_card_shows_description_box_when_present(qtbot, tmp_path):
     card._toggle()
     assert card.extra_box is not None
     assert card.extra_box.toPlainText() == "hello world"
+
+
+def test_history_card_shows_chapters_with_description(qtbot, tmp_path):
+    f = tmp_path / "track.mp3"
+    f.write_bytes(b"x")
+    entry = {
+        "ts": "now", "url": "https://x", "title": "T", "kind": "video", "container": "mp4",
+        "site": "yt-dlp", "status": "ok", "path": str(f), "description": "hello world",
+        "chapters": [{"start_time": 0, "title": "Intro"}, {"start_time": 65, "title": "Part 2"}],
+    }
+    card = HistoryCard(entry, 0, TOKENS["dark"], load_into_player_cb=lambda *a: None)
+    qtbot.addWidget(card)
+    card._toggle()
+    assert card.extra_box is not None
+    text = card.extra_box.toPlainText()
+    assert "hello world" in text
+    assert "Главы:" in text
+    assert "0:00  Intro" in text
+    detail_text = card.detail_widget.findChild(QLabel, "dim").text()
+    assert "Главы: 2" in detail_text
 
 
 def test_history_card_error_entry_has_no_extra_box(qtbot):
