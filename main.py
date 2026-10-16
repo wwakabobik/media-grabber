@@ -1781,6 +1781,21 @@ class MainWindow(QMainWindow):
         self.history_collapse_btn.setIcon(
             icon("chevron-right" if self._history_collapsed else "chevron-down", TOKENS[self._effective_theme]["icon"])
         )
+        self._update_history_action_buttons()
+
+    def _update_history_action_buttons(self) -> None:
+        # Meaningless while the list isn't even shown; while it is, "select
+        # all"/"clear selection" only make sense when there's something left
+        # to do -- no point offering to select all when everything already is.
+        if self._history_collapsed:
+            self.select_all_btn.hide()
+            self.select_none_btn.hide()
+            self.delete_history_btn.hide()
+            return
+        checked = [c.checkbox.isChecked() for c in self._history_cards]
+        self.select_all_btn.setVisible(not all(checked))  # all([]) is True -> hidden when the list is empty too
+        self.select_none_btn.setVisible(any(checked))
+        self.delete_history_btn.show()
 
     def _on_position(self, pos: int) -> None:
         if not self.seek_slider.isSliderDown():
@@ -1893,13 +1908,16 @@ class MainWindow(QMainWindow):
             if status_filter and entry_disk_status(entry) != status_filter:
                 continue
             card = HistoryCard(entry, idx, t, self._load_into_player, self._open_convert_dialog, self.history_container)
+            card.checkbox.toggled.connect(self._update_history_action_buttons)
             self.history_container_layout.insertWidget(insert_at, card)
             insert_at += 1
             self._history_cards.append(card)
+        self._update_history_action_buttons()
 
     def _set_all_history_checked(self, checked: bool) -> None:
         for card in self._history_cards:
             card.checkbox.setChecked(checked)
+        self._update_history_action_buttons()
 
     def _delete_selected_history(self) -> None:
         selected = [c for c in self._history_cards if c.checkbox.isChecked()]
