@@ -196,6 +196,7 @@ _ICON_PATHS: dict[str, str] = {
     "download": '<path d="M12 3v12M7 11l5 5 5-5M5 20h14"/>',
     "chevron-down": '<path d="M6 9l6 6 6-6"/>',
     "chevron-right": '<path d="M9 6l6 6-6 6"/>',
+    "monitor": '<rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><path d="M8 21h8M12 17v4"/>',
 }
 
 

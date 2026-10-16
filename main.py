@@ -13,6 +13,7 @@ import html
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import urllib.request
@@ -20,6 +21,25 @@ from datetime import datetime
 from pathlib import Path
 
 os.environ.setdefault("QT_MAC_WANTS_LAYER", "1")  # frozen/signed .app: video widget renders black without this
+
+def _ensure_ffmpeg_on_path() -> None:
+    """A frozen .app launched from Finder/LaunchServices gets a minimal PATH
+    (just /usr/bin:/bin:/usr/sbin:/sbin -- no Homebrew), so yt-dlp's ffmpeg
+    check fails with "ffmpeg is not installed" even on a machine that
+    genuinely has it installed, confirmed via a real report with Homebrew's
+    ffmpeg present at /opt/homebrew/bin. Extends PATH with the common
+    Homebrew locations if ffmpeg isn't already reachable -- a no-op
+    everywhere else (Terminal/dev venv already has the right PATH, so
+    shutil.which succeeds and this never runs)."""
+    if sys.platform != "darwin" or shutil.which("ffmpeg") is not None:
+        return
+    for brew_bin in ("/opt/homebrew/bin", "/usr/local/bin"):
+        if Path(brew_bin, "ffmpeg").exists():
+            os.environ["PATH"] = f"{brew_bin}:{os.environ.get('PATH', '')}"
+            return
+
+
+_ensure_ffmpeg_on_path()
 
 import yt_dlp
 from PySide6.QtCore import Qt, QThread, QTimer, QUrl, Signal
@@ -84,6 +104,7 @@ QUALITIES = {
 }
 
 THEME_OPTIONS = ["light", "dark", "system"]
+THEME_ICONS = {"light": "sun", "dark": "moon", "system": "monitor"}
 
 
 YANDEX_TRACK_RE = re.compile(r"music\.yandex\.\w+/album/(\d+)/track/(\d+)")
@@ -1049,14 +1070,18 @@ class MainWindow(QMainWindow):
         title_label.setObjectName("heading")
         header.addWidget(title_label)
         header.addStretch()
-        self.theme_combo = QComboBox()
-        for key in THEME_OPTIONS:
-            self.theme_combo.addItem(tr(f"theme.{key}"), key)
-        self.theme_combo.setCurrentIndex(self.theme_combo.findData(self.theme))
-        self.theme_combo.currentIndexChanged.connect(self._on_theme_changed)
-        header.addWidget(self.theme_combo)
+        # Icon-only, cycling through light -> dark -> system on each click --
+        # tried a QComboBox with blank-text icon items first, but its built-in
+        # padding + dropdown-arrow space clipped the icon badly at any
+        # reasonable width (confirmed via a real screenshot). A plain button
+        # matches every other icon-only control here (settings, video/history
+        # collapse) and needs no special-casing.
+        self.theme_btn = QPushButton()
+        self.theme_btn.setObjectName("iconBtn")
+        self.theme_btn.clicked.connect(self._on_theme_changed)
+        header.addWidget(self.theme_btn)
         self.settings_btn = QPushButton()
-        self.settings_btn.setObjectName("secondary")
+        self.settings_btn.setObjectName("iconBtn")
         self.settings_btn.clicked.connect(self._open_settings)
         header.addWidget(self.settings_btn)
         layout.addLayout(header)
@@ -1200,8 +1225,15 @@ class MainWindow(QMainWindow):
         self.player.durationChanged.connect(lambda d: self.seek_slider.setRange(0, d))
         self.player.playbackStateChanged.connect(self._on_playback_state)
 
-        # History
+        # History -- collapsed by default (the search/filters/list below live
+        # in history_body, a separate widget toggled by this chevron), so the
+        # window opens short instead of immediately showing a long list.
         history_header = QHBoxLayout()
+        self._history_collapsed = True
+        self.history_collapse_btn = QPushButton()
+        self.history_collapse_btn.setObjectName("iconBtn")
+        self.history_collapse_btn.clicked.connect(self._toggle_history_collapsed)
+        history_header.addWidget(self.history_collapse_btn)
         self.history_title = QLabel()
         self.history_title.setObjectName("heading")
         history_header.addWidget(self.history_title)
@@ -1223,10 +1255,15 @@ class MainWindow(QMainWindow):
         history_header.addWidget(self.delete_history_btn)
         layout.addLayout(history_header)
 
+        self.history_body = QWidget()
+        history_body_layout = QVBoxLayout(self.history_body)
+        history_body_layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(self.history_body)
+
         self._history_filter = ""
         self.history_search = QLineEdit()
         self.history_search.textChanged.connect(self._on_history_search)
-        layout.addWidget(self.history_search)
+        history_body_layout.addWidget(self.history_search)
 
         filters_row = QHBoxLayout()
         self.filter_site = QComboBox()
@@ -1244,7 +1281,7 @@ class MainWindow(QMainWindow):
         self.filter_folder_label = QLabel()
         filters_row.addWidget(self.filter_folder_label)
         filters_row.addWidget(self.filter_dir, 1)
-        layout.addLayout(filters_row)
+        history_body_layout.addLayout(filters_row)
 
         filters_row2 = QHBoxLayout()
         self.filter_kind = QComboBox()
@@ -1257,7 +1294,7 @@ class MainWindow(QMainWindow):
         self.filter_status_label = QLabel()
         filters_row2.addWidget(self.filter_status_label)
         filters_row2.addWidget(self.filter_status, 1)
-        layout.addLayout(filters_row2)
+        history_body_layout.addLayout(filters_row2)
 
         # A scroll area of card widgets, not a QTreeWidget: word-wrapped multi-line
         # content inside QTreeWidgetItem rows doesn't get sized correctly by Qt once
@@ -1279,9 +1316,20 @@ class MainWindow(QMainWindow):
         self.history_container_layout.setSpacing(8)
         self.history_container_layout.addStretch(1)
         self.history_scroll.setWidget(self.history_container)
-        layout.addWidget(self.history_scroll, 2)
+        history_body_layout.addWidget(self.history_scroll, 2)
         self._history_cards: list[HistoryCard] = []
         self._render_history()
+        self.history_body.hide()
+
+        # Absorbs whatever vertical space the visible widgets above don't need --
+        # without it, a QVBoxLayout with no stretch distributes leftover space
+        # (there's plenty once history/player default to hidden, or the outer
+        # scroll area stretches root to fill a tall viewport) among whichever
+        # widgets *can* grow, which blew the live-preview card's title label up
+        # to 150+ px tall instead of one normal line. Reproduced in isolation
+        # with a minimal QVBoxLayout containing only that one card and no
+        # trailing stretch -- confirmed fixed by adding exactly this.
+        layout.addStretch(1)
 
         # Overlay shown during a download, blocking input controls
         self.overlay = QWidget(root)
@@ -1334,6 +1382,12 @@ class MainWindow(QMainWindow):
         self._preview_timer.stop()
         if "http" in text:
             self._preview_timer.start(700)
+
+        # Editing the URL invalidates whatever's in the player -- it belongs to
+        # a different link (or none) now. It comes back once this download
+        # finishes or a history entry is loaded, both through _load_into_player().
+        if self._player_loaded:
+            self.player_section.hide()
 
     def _start_preview(self) -> None:
         url = self.url_edit.text().strip()
@@ -1394,11 +1448,12 @@ class MainWindow(QMainWindow):
         scheme = QApplication.instance().styleHints().colorScheme()
         return "light" if scheme == Qt.ColorScheme.Light else "dark"
 
-    def _on_theme_changed(self, _index: int) -> None:
-        self.theme = self.theme_combo.currentData()
+    def _on_theme_changed(self) -> None:
+        self.theme = THEME_OPTIONS[(THEME_OPTIONS.index(self.theme) + 1) % len(THEME_OPTIONS)]
         self.state["theme"] = self.theme
         save_state(self.state)
         log.info("ui.theme_changed", theme=self.theme)
+        self.theme_btn.setToolTip(tr(f"theme.{self.theme}"))
         self._apply_theme()
         self._render_history()
 
@@ -1416,25 +1471,29 @@ class MainWindow(QMainWindow):
         self.open_browser_btn.setIcon(icon("globe", t["icon"]))
         self.play_btn.setIcon(icon("pause" if self._is_playing() else "play", t["icon"]))
         self.video_collapse_btn.setIcon(icon("chevron-right" if self._video_collapsed else "chevron-down", t["icon"]))
+        self.history_collapse_btn.setIcon(
+            icon("chevron-right" if self._history_collapsed else "chevron-down", t["icon"])
+        )
         self.settings_btn.setIcon(icon("settings", t["icon"]))
         self.delete_history_btn.setIcon(icon("trash", t["icon"]))
         self.select_all_btn.setIcon(icon("check", t["icon"]))
         self.select_none_btn.setIcon(icon("x", t["icon"]))
         self.download_btn.setIcon(icon("download", t["accent_text"]))
+        self.theme_btn.setIcon(icon(THEME_ICONS[self.theme], t["icon"]))
         self.overlay.setStyleSheet(
             f"background-color: {('rgba(10, 10, 15, 200)' if self._effective_theme == 'dark' else 'rgba(255, 255, 255, 215)')};"
         )
 
     def _retranslate_ui(self) -> None:
-        for key in THEME_OPTIONS:
-            self.theme_combo.setItemText(self.theme_combo.findData(key), tr(f"theme.{key}"))
+        self.theme_btn.setToolTip(tr(f"theme.{self.theme}"))
         self.url_edit.setPlaceholderText(tr("url.placeholder"))
         self.open_browser_btn.setToolTip(tr("tooltip.open_in_browser"))
-        self.settings_btn.setText(tr("button.settings"))
+        self.settings_btn.setToolTip(tr("button.settings"))
         self.download_btn.setText(tr("button.download"))
         if self._status_is_pristine:
             self.status_label.setText(tr("status.ready"))
         self.video_collapse_btn.setToolTip(tr("tooltip.collapse_video"))
+        self.history_collapse_btn.setToolTip(tr("tooltip.collapse_history"))
         self.info_toggle_btn.setText(tr("button.description_lyrics"))
         self.info_save_btn.setText(tr("button.save_as"))
         self.history_title.setText(tr("heading.history"))
@@ -1658,6 +1717,7 @@ class MainWindow(QMainWindow):
 
     # -- preview player -------------------------------------------------
     def _load_into_player(self, path: str, kind: str, title: str) -> None:
+        self.url_edit.clear()  # also hides player_section via _on_url_changed; shown again right below
         self.player.pause()
         self._player_loaded = True
         self.player_section.show()
@@ -1714,6 +1774,28 @@ class MainWindow(QMainWindow):
         self.video_collapse_btn.setIcon(
             icon("chevron-right" if self._video_collapsed else "chevron-down", TOKENS[self._effective_theme]["icon"])
         )
+
+    def _toggle_history_collapsed(self) -> None:
+        self._history_collapsed = not self._history_collapsed
+        self.history_body.setVisible(not self._history_collapsed)
+        self.history_collapse_btn.setIcon(
+            icon("chevron-right" if self._history_collapsed else "chevron-down", TOKENS[self._effective_theme]["icon"])
+        )
+        self._update_history_action_buttons()
+
+    def _update_history_action_buttons(self) -> None:
+        # Meaningless while the list isn't even shown; while it is, "select
+        # all"/"clear selection" only make sense when there's something left
+        # to do -- no point offering to select all when everything already is.
+        if self._history_collapsed:
+            self.select_all_btn.hide()
+            self.select_none_btn.hide()
+            self.delete_history_btn.hide()
+            return
+        checked = [c.checkbox.isChecked() for c in self._history_cards]
+        self.select_all_btn.setVisible(not all(checked))  # all([]) is True -> hidden when the list is empty too
+        self.select_none_btn.setVisible(any(checked))
+        self.delete_history_btn.setVisible(any(checked))
 
     def _on_position(self, pos: int) -> None:
         if not self.seek_slider.isSliderDown():
@@ -1826,13 +1908,16 @@ class MainWindow(QMainWindow):
             if status_filter and entry_disk_status(entry) != status_filter:
                 continue
             card = HistoryCard(entry, idx, t, self._load_into_player, self._open_convert_dialog, self.history_container)
+            card.checkbox.toggled.connect(self._update_history_action_buttons)
             self.history_container_layout.insertWidget(insert_at, card)
             insert_at += 1
             self._history_cards.append(card)
+        self._update_history_action_buttons()
 
     def _set_all_history_checked(self, checked: bool) -> None:
         for card in self._history_cards:
             card.checkbox.setChecked(checked)
+        self._update_history_action_buttons()
 
     def _delete_selected_history(self) -> None:
         selected = [c for c in self._history_cards if c.checkbox.isChecked()]

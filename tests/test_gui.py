@@ -306,7 +306,10 @@ def test_main_window_content_is_scrollable_when_window_is_too_small(qtbot, tmp_p
     win = MainWindow()
     qtbot.addWidget(win)
     win.resize(820, 500)
+    win.show()  # the scroll area only recomputes its range on a real show/resize cycle
     win._load_into_player(str(f), "video", "A Clip")
+    win._toggle_history_collapsed()  # history starts collapsed; expand it so there's enough content
+    qtbot.wait(10)
 
     outer = win.centralWidget()
     assert isinstance(outer, QScrollArea)
@@ -371,6 +374,79 @@ def test_main_window_player_section_hidden_until_something_is_loaded(qtbot, tmp_
     f.write_bytes(b"x")
     win._load_into_player(str(f), "audio", "A Track")
     assert win.player_section.isHidden() is False
+
+
+def test_main_window_history_collapsed_by_default(qtbot):
+    win = MainWindow()
+    qtbot.addWidget(win)
+    assert win.history_body.isHidden() is True
+
+    win._toggle_history_collapsed()
+    assert win.history_body.isHidden() is False
+
+    win._toggle_history_collapsed()
+    assert win.history_body.isHidden() is True
+
+
+def test_main_window_editing_url_hides_the_loaded_player(qtbot, tmp_path):
+    f = tmp_path / "track.mp3"
+    f.write_bytes(b"x")
+    win = MainWindow()
+    qtbot.addWidget(win)
+    win._load_into_player(str(f), "audio", "A Track")
+    assert win.player_section.isHidden() is False
+
+    win.url_edit.setText("https://example.com/something")
+    assert win.player_section.isHidden() is True
+
+
+def test_main_window_editing_url_before_anything_was_ever_loaded_is_a_noop(qtbot):
+    win = MainWindow()
+    qtbot.addWidget(win)
+    assert win.player_section.isHidden() is True
+
+    win.url_edit.setText("https://example.com/something")
+    assert win.player_section.isHidden() is True  # still hidden, nothing weird happens
+
+
+def test_main_window_load_into_player_clears_the_url_field_and_shows_again(qtbot, tmp_path):
+    f = tmp_path / "track.mp3"
+    f.write_bytes(b"x")
+    win = MainWindow()
+    qtbot.addWidget(win)
+    win.url_edit.setText("https://example.com/pending")
+
+    win._load_into_player(str(f), "audio", "A Track")
+
+    assert win.url_edit.text() == ""
+    assert win.player_section.isHidden() is False  # re-shown despite the clear hiding it in between
+
+
+def test_main_window_editing_url_hides_a_live_preview(qtbot, tmp_path):
+    win = MainWindow()
+    qtbot.addWidget(win)
+    win.preview_card.show()
+
+    win.url_edit.setText("https://example.com/something-else")
+    assert win.preview_card.isHidden() is True
+
+
+def test_main_window_preview_card_does_not_balloon_in_height(qtbot):
+    # Regression: with history/player collapsed by default, the main layout had
+    # leftover vertical space and no trailing stretch to absorb it, so Qt
+    # redistributed it into the live-preview title label -- 150+ px tall for
+    # one line of text, pushing the cover/duration far below it. Reproduced in
+    # isolation with a minimal QVBoxLayout before finding this exact fix.
+    win = MainWindow()
+    qtbot.addWidget(win)
+    win.show()
+    win._on_preview_ready(
+        {"title": "Dabeull - INDASTUDIO (Give Me The Fonk)", "duration": 111, "cover": None},
+        win._preview_generation,
+    )
+    qtbot.wait(10)
+    assert win.preview_title.height() < 40
+    assert win.preview_card.height() < 100
 
 
 def test_main_window_retranslate_ui_switches_button_text(qtbot):
@@ -460,21 +536,24 @@ def test_entry_disk_status(tmp_path):
     assert entry_disk_status({"status": "error"}) == "error"
 
 
-def test_main_window_theme_combo_has_three_options_and_picks_up_saved_choice(qtbot):
+def test_main_window_theme_button_cycles_through_light_dark_system(qtbot):
     win = MainWindow()
     qtbot.addWidget(win)
-    assert [win.theme_combo.itemData(i) for i in range(win.theme_combo.count())] == ["light", "dark", "system"]
-    win.theme = "dark"
-    win.state["theme"] = "dark"
+    win.theme = "light"
+    win._on_theme_changed()
+    assert win.theme == "dark"
+    win._on_theme_changed()
+    assert win.theme == "system"
+    win._on_theme_changed()
+    assert win.theme == "light"
 
 
 def test_main_window_on_theme_changed_persists_and_applies(qtbot):
     win = MainWindow()
     qtbot.addWidget(win)
+    win.theme = "light"  # known baseline
     with patch("main.save_state") as mocked_save:
-        win.theme_combo.setCurrentIndex(win.theme_combo.findData("light"))  # known baseline
-        mocked_save.reset_mock()
-        win.theme_combo.setCurrentIndex(win.theme_combo.findData("dark"))
+        win._on_theme_changed()
         assert win.theme == "dark"
         assert win._effective_theme == "dark"
         mocked_save.assert_called_once_with(win.state)
@@ -574,6 +653,61 @@ def test_main_window_select_all_only_checks_the_currently_filtered_cards(qtbot, 
 
     win._set_all_history_checked(False)
     assert all(not c.checkbox.isChecked() for c in win._history_cards)
+
+
+def test_main_window_history_action_buttons_hidden_while_collapsed(qtbot, tmp_path):
+    f = tmp_path / "a.mp3"
+    f.write_bytes(b"x")
+    win = MainWindow()
+    qtbot.addWidget(win)
+    win.state["history"] = [
+        {"ts": "now", "url": "https://a", "title": "A", "kind": "audio",
+         "container": "mp3", "site": "yt-dlp", "status": "ok", "path": str(f)},
+    ]
+    win._render_history()
+    win._history_cards[0].checkbox.setChecked(True)
+    assert win._history_collapsed is True
+    assert win.select_all_btn.isHidden() is True
+    assert win.select_none_btn.isHidden() is True
+    assert win.delete_history_btn.isHidden() is True  # hidden while collapsed even with something checked
+
+    win._toggle_history_collapsed()
+    assert win.delete_history_btn.isHidden() is False  # checked from before collapsing, still checked now
+
+
+def test_main_window_select_all_and_none_visibility_follows_checkbox_state(qtbot, tmp_path):
+    f1, f2 = tmp_path / "a.mp3", tmp_path / "b.mp3"
+    f1.write_bytes(b"x")
+    f2.write_bytes(b"x")
+    win = MainWindow()
+    qtbot.addWidget(win)
+    win.state["history"] = [
+        {"ts": "now", "url": "https://a", "title": "A", "kind": "audio",
+         "container": "mp3", "site": "yt-dlp", "status": "ok", "path": str(f1)},
+        {"ts": "now", "url": "https://b", "title": "B", "kind": "audio",
+         "container": "mp3", "site": "yt-dlp", "status": "ok", "path": str(f2)},
+    ]
+    win._render_history()
+    win._toggle_history_collapsed()  # expand -- nothing checked yet
+
+    assert win.select_all_btn.isHidden() is False  # something still unchecked
+    assert win.select_none_btn.isHidden() is True  # nothing checked yet
+    assert win.delete_history_btn.isHidden() is True  # nothing checked yet
+
+    win._history_cards[0].checkbox.setChecked(True)
+    assert win.select_all_btn.isHidden() is False  # "B" still unchecked
+    assert win.select_none_btn.isHidden() is False  # "A" is checked now
+    assert win.delete_history_btn.isHidden() is False
+
+    win._history_cards[1].checkbox.setChecked(True)
+    assert win.select_all_btn.isHidden() is True  # everything is checked
+    assert win.select_none_btn.isHidden() is False
+    assert win.delete_history_btn.isHidden() is False
+
+    win._set_all_history_checked(False)
+    assert win.select_all_btn.isHidden() is False
+    assert win.select_none_btn.isHidden() is True
+    assert win.delete_history_btn.isHidden() is True
 
 
 def test_convert_targets_cover_the_expected_formats():

@@ -1,9 +1,11 @@
+import os
 from unittest.mock import MagicMock, patch
 
 from main import (
     YANDEX_ALBUM_RE,
     YANDEX_PLAYLIST_RE,
     YANDEX_TRACK_RE,
+    _ensure_ffmpeg_on_path,
     clean_description,
     format_chapters,
     format_duration,
@@ -145,3 +147,37 @@ def test_reveal_in_finder_uses_open_dash_r(monkeypatch):
     assert calls
     args, _kwargs = calls[0]
     assert args[0] == ["open", "-R", "/some/file.mp3"]
+
+
+def test_ensure_ffmpeg_on_path_extends_path_when_missing(monkeypatch):
+    # Reproduced for real: a frozen .app launched from Finder gets a minimal
+    # PATH with no Homebrew, so yt-dlp's ffmpeg check fails even though
+    # ffmpeg is genuinely installed at /opt/homebrew/bin.
+    monkeypatch.setattr("main.sys.platform", "darwin")
+    monkeypatch.setattr("main.shutil.which", lambda _name: None)
+    monkeypatch.setattr("main.Path.exists", lambda self: str(self) == "/opt/homebrew/bin/ffmpeg")
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+
+    _ensure_ffmpeg_on_path()
+
+    assert os.environ["PATH"].startswith("/opt/homebrew/bin")
+
+
+def test_ensure_ffmpeg_on_path_is_a_noop_when_already_found(monkeypatch):
+    monkeypatch.setattr("main.sys.platform", "darwin")
+    monkeypatch.setattr("main.shutil.which", lambda _name: "/usr/bin/ffmpeg")
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+
+    _ensure_ffmpeg_on_path()
+
+    assert os.environ["PATH"] == "/usr/bin:/bin"
+
+
+def test_ensure_ffmpeg_on_path_is_a_noop_on_non_macos(monkeypatch):
+    monkeypatch.setattr("main.sys.platform", "linux")
+    monkeypatch.setattr("main.shutil.which", lambda _name: None)
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+
+    _ensure_ffmpeg_on_path()
+
+    assert os.environ["PATH"] == "/usr/bin:/bin"
