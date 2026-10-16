@@ -1,0 +1,10 @@
+[project]
+name = "media-grabber"
+version = "0.1.0"
+description = "Desktop app: paste a YouTube/Vimeo/Spotify URL, pick a format, download, preview in-app"
+requires-python = ">=3.12"
+dependencies = [
+    "PySide6>=6.7",
+    "yt-dlp>=2024.12.0",
+    "spotdl>=4.2.0",
+]
