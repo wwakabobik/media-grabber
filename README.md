@@ -34,6 +34,11 @@ sites serve it, so there'd be nothing to download into that container.
   its status. A repeat download of the same title never overwrites the previous file — it gets
   a `(1)`, `(2)`, ... suffix, like a browser's download manager.
 - Persisted to `~/.config/media-grabber/state.json`.
+- Picking a Spotify URL greys out the video option — Spotify has no video, so there's nothing
+  to offer there.
+- Structured logging ([structlog](https://www.structlog.org/)): human-readable in the console,
+  JSON with keyword context (url, kind, path, errors...) in a rotating file at
+  `~/.config/media-grabber/logs/media-grabber.log` (5 MB x 5 backups).
 
 ## Known limitations
 
@@ -55,8 +60,14 @@ Requires `ffmpeg` on `PATH` (used for audio extraction and video muxing).
 ### Building a standalone `.app` (macOS)
 
 ```bash
-uv run pyinstaller --windowed --name "MediaGrabber" --icon=icon/AppIcon.icns --noconfirm main.py
+uv run pyinstaller --windowed --name "MediaGrabber" --icon=icon/AppIcon.icns \
+  --collect-data pykakasi --collect-data ytmusicapi --noconfirm main.py
 ```
+
+The `--collect-data` flags are required: spotdl's dependency chain (`pykakasi`, `ytmusicapi`)
+ships data files (dictionaries, locale `.mo` files) that PyInstaller doesn't pick up on its own —
+without them Spotify downloads fail inside the bundled `.app` with a missing-file error, even
+though `uv run python main.py` works fine (it reads straight from the dev venv's site-packages).
 
 The result is in `dist/MediaGrabber.app` — copy it to `/Applications` to install.
 
