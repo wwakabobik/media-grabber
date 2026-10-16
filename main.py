@@ -94,7 +94,29 @@ _spotdl_client = None  # spotdl's SpotifyClient is a process-wide singleton; re-
 
 
 def _get_spotdl_client(output_template: str):
+    """Returns the process-wide Spotdl client, with its Downloader rebuilt fresh
+    for the calling thread.
+
+    spotdl's Downloader binds an asyncio event loop + semaphore to whichever
+    thread constructs it (Downloader.__init__ creates its own loop and calls
+    asyncio.set_event_loop() on it). Reusing one Downloader across QThreads --
+    each its own real OS thread -- breaks with "There is no current event loop
+    in thread 'Dummy-N'" or "The future belongs to a different loop", both
+    reproduced in isolation with a plain QThread calling spotdl directly.
+    SpotifyClient (the actual Spotify auth) is a true one-per-process singleton
+    that raises if initialized twice, so only the Downloader -- which carries
+    no such process-wide state -- gets rebuilt here, once per calling thread.
+
+    simple_tui=True is required on every rebuild: a non-simple Downloader opens
+    a rich.progress.Progress "Live" display in its ProgressHandler.__init__,
+    and only one Live may be active per process -- rebuilding the Downloader
+    without it raises "Only one live display may be active at once" on the
+    second call. This app has its own Qt progress bar; spotdl's console TUI
+    was never wired to anything here anyway.
+    """
     global _spotdl_client
+    from spotdl.download.downloader import Downloader
+
     if _spotdl_client is None:
         from spotdl import Spotdl
         from spotdl.utils.config import DEFAULT_CONFIG
@@ -102,10 +124,11 @@ def _get_spotdl_client(output_template: str):
         _spotdl_client = Spotdl(
             client_id=DEFAULT_CONFIG["client_id"],
             client_secret=DEFAULT_CONFIG["client_secret"],
-            downloader_settings={"output": output_template},
+            downloader_settings={"output": output_template, "simple_tui": True},
         )
     else:
-        _spotdl_client.downloader.settings["output"] = output_template
+        settings = {**_spotdl_client.downloader.settings, "output": output_template, "simple_tui": True}
+        _spotdl_client.downloader = Downloader(settings=settings)
     return _spotdl_client
 
 
@@ -160,6 +183,16 @@ def clean_description(text: str | None) -> str | None:
         return None
     text = re.sub(r"<[^>]+>", "", text)
     return html.unescape(text).replace("\xa0", " ").strip() or None
+
+
+def friendly_error(url: str, message: str) -> str:
+    """Vimeo's web client refuses yt-dlp entirely without a logged-in session
+    cookie (confirmed against several real public Vimeo videos, not just a
+    guess) -- translate that one well-known, unfixable-without-cookies case
+    instead of surfacing yt-dlp's raw English wall of text."""
+    if "vimeo.com" in url and "only works when logged-in" in message:
+        return "Vimeo требует авторизации даже для этого видео — без куки залогиненного аккаунта yt-dlp скачать не может (ограничение самого Vimeo, не этого приложения)."
+    return message
 
 
 def reveal_in_finder(path: str) -> None:
@@ -274,7 +307,7 @@ class DownloadWorker(QThread):
             self.finished_ok.emit(result)
         except Exception as e:  # noqa: BLE001 -- yt-dlp/spotdl raise all sorts; surface whatever it is to the UI
             log.error("download.failed", url=self.url, kind=self.kind, error=str(e))
-            self.failed.emit(str(e))
+            self.failed.emit(friendly_error(self.url, str(e)))
 
     def _hook(self, d: dict) -> None:
         if d["status"] == "downloading":
@@ -491,7 +524,7 @@ class ResolveWorker(QThread):
             self.resolved.emit(name, items)
         except Exception as e:  # noqa: BLE001 -- surfaced to the UI as a plain error, not fatal
             log.error("resolve.failed", url=self.url, error=str(e))
-            self.failed.emit(str(e))
+            self.failed.emit(friendly_error(self.url, str(e)))
 
 
 class PreviewWorker(QThread):
@@ -654,11 +687,12 @@ class HistoryCard(QWidget):
         self.outer.setSpacing(8)
 
         header = QHBoxLayout()
-        header.setSpacing(10)
+        header.setSpacing(16)
         self.checkbox = QCheckBox()
         header.addWidget(self.checkbox)
         status_label = QLabel()
         status_label.setPixmap(icon(status_icon, status_color).pixmap(18, 18))
+        status_label.setContentsMargins(0, 0, 0, 0)
         header.addWidget(status_label)
         title_label = QLabel(f"{entry['title']}  —  {kind_word}  —  {entry['ts']}")
         title_label.setWordWrap(True)

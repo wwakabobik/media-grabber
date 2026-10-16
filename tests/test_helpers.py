@@ -6,6 +6,7 @@ from main import (
     YANDEX_TRACK_RE,
     clean_description,
     format_duration,
+    friendly_error,
     is_yandex_music,
     read_media_info,
     reveal_in_finder,
@@ -73,6 +74,51 @@ def test_read_media_info_never_raises_on_bad_file():
     # not an exception -- metadata is always best-effort.
     info = read_media_info("/nonexistent/path/does-not-exist.mp3")
     assert info == {}
+
+
+def test_friendly_error_translates_vimeo_login_wall():
+    msg = friendly_error(
+        "https://vimeo.com/148751763",
+        "ERROR: [vimeo] 148751763: The web client only works when logged-in. Use --cookies...",
+    )
+    assert "ограничение самого Vimeo" in msg
+
+
+def test_friendly_error_passes_through_other_messages():
+    assert friendly_error("https://youtube.com/watch?v=x", "some other error") == "some other error"
+
+
+def test_get_spotdl_client_rebuilds_downloader_per_call_not_the_client():
+    # Reproduced for real: reusing one spotdl Downloader across QThreads (each a
+    # distinct OS thread) raises "There is no current event loop in thread
+    # 'Dummy-N'" or "The future belongs to a different loop" -- Downloader binds
+    # an asyncio loop/semaphore to whichever thread constructs it. The fix is to
+    # keep the Spotdl/SpotifyClient singleton (which raises if re-initialized)
+    # but rebuild just the Downloader fresh on every call.
+    import main
+
+    main._spotdl_client = None
+    fake_spotdl_cls = MagicMock()
+    fake_downloader_cls = MagicMock()
+    first_downloader = MagicMock(settings={"output": "old", "simple_tui": False})
+    fake_spotdl_cls.return_value.downloader = first_downloader
+
+    with patch("spotdl.Spotdl", fake_spotdl_cls), patch(
+        "spotdl.download.downloader.Downloader", fake_downloader_cls
+    ):
+        client1 = main._get_spotdl_client("{title}.mp3")
+        fake_spotdl_cls.assert_called_once()  # Spotdl()/SpotifyClient.init() only once
+
+        client2 = main._get_spotdl_client("{title}.flac")
+        assert client2 is client1  # same Spotdl/SpotifyClient singleton
+        fake_spotdl_cls.assert_called_once()  # still only once -- never re-initialized
+        fake_downloader_cls.assert_called_once()  # Downloader rebuilt for the 2nd call
+        new_settings = fake_downloader_cls.call_args.kwargs["settings"]
+        assert new_settings["output"] == "{title}.flac"
+        assert new_settings["simple_tui"] is True  # no rich Live display in a GUI app
+        assert client1.downloader is fake_downloader_cls.return_value
+
+    main._spotdl_client = None
 
 
 def test_reveal_in_finder_uses_open_dash_r(monkeypatch):
