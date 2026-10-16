@@ -20,7 +20,7 @@ os.environ.setdefault("QT_MAC_WANTS_LAYER", "1")  # frozen/signed .app: video wi
 
 import yt_dlp
 from PySide6.QtCore import Qt, QThread, QUrl, Signal
-from PySide6.QtGui import QColor
+from PySide6.QtGui import QColor, QDesktopServices
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
@@ -105,13 +105,17 @@ def _get_spotdl_client(output_template: str):
     return _spotdl_client
 
 
-def resolve_playlist(url: str, yandex_token: str) -> list[tuple[str, str]] | None:
-    """If `url` points at a playlist/album/multi-track link, return [(title, item_url), ...]
-    so the UI can offer a pick-list. Returns None for an ordinary single-item link."""
+def resolve_playlist(url: str, yandex_token: str) -> tuple[str, list[tuple[str, str]]] | None:
+    """If `url` points at a playlist/album/multi-track link, return (collection_title,
+    [(title, item_url), ...]) so the UI can offer a pick-list and file things into a
+    subfolder named after it. Returns None for an ordinary single-item link."""
     if is_spotify(url):
         client = _get_spotdl_client("{artists} - {title}.{output-ext}")
         songs = client.search([url])
-        return [(s.display_name, s.url) for s in songs] if len(songs) > 1 else None
+        if len(songs) <= 1:
+            return None
+        name = songs[0].list_name or songs[0].album_name or "Spotify playlist"
+        return name, [(s.display_name, s.url) for s in songs]
 
     if is_yandex_music(url):
         if YANDEX_TRACK_RE.search(url):
@@ -123,13 +127,16 @@ def resolve_playlist(url: str, yandex_token: str) -> list[tuple[str, str]] | Non
         if m:
             album = client.albums_with_tracks(m.group(1))
             tracks = [t for volume in (album.volumes or []) for t in volume]
+            name = album.title if album else "Yandex album"
         else:
             m = YANDEX_PLAYLIST_RE.search(url)
             if not m:
                 return None
             playlist = client.users_playlists(m.group(2), m.group(1))
             tracks = [ts.fetch_track() for ts in playlist.tracks] if playlist else []
-        return [(_yandex_track_title(t), f"yandex:{t.id}") for t in tracks] or None
+            name = playlist.title if playlist else "Yandex playlist"
+        items = [(_yandex_track_title(t), f"yandex:{t.id}") for t in tracks]
+        return (name, items) if items else None
 
     # Generic yt-dlp sources (YouTube, Vimeo, SoundCloud, VK, ...)
     # playlistend caps it so an accidentally-pasted channel/feed URL (thousands of videos)
@@ -139,7 +146,8 @@ def resolve_playlist(url: str, yandex_token: str) -> list[tuple[str, str]] | Non
     entries = [e for e in (info.get("entries") or []) if e]
     if not entries:
         return None
-    return [(e.get("title") or e.get("id"), e.get("url") or e.get("webpage_url")) for e in entries]
+    items = [(e.get("title") or e.get("id"), e.get("url") or e.get("webpage_url")) for e in entries]
+    return info.get("title") or "Playlist", items
 
 
 def load_state() -> dict:
@@ -247,10 +255,16 @@ class DownloadWorker(QThread):
             "noplaylist": True,
             "progress_hooks": [self._hook],
             "overwrites": True,
+            "writethumbnail": True,
+            # embed cover art + title/uploader/description/upload_date as container tags
+            "postprocessors": [
+                {"key": "EmbedThumbnail"},
+                {"key": "FFmpegMetadata", "add_metadata": True},
+            ],
         }
         if self.kind == "audio":
             opts["format"] = "bestaudio/best"
-            opts["postprocessors"] = [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3"}]
+            opts["postprocessors"].insert(0, {"key": "FFmpegExtractAudio", "preferredcodec": "mp3"})
         else:
             # Prefer H.264: Qt Multimedia's bundled ffmpeg can't hw-decode AV1/VP9 on
             # this platform, which yt-dlp's plain "bestvideo" would otherwise pick.
@@ -265,12 +279,33 @@ class DownloadWorker(QThread):
             path = ydl.prepare_filename(info)
             ext = "mp3" if self.kind == "audio" else self.container
             path = str(Path(path).with_suffix(f".{ext}"))
+
+        if self.kind == "video":
+            self._fetch_subtitles(unique_stem)
+
         return {
             "title": info.get("title") or self.url,
             "path": path,
             "kind": self.kind,
             "site": "yt-dlp",
         }
+
+    def _fetch_subtitles(self, stem: str) -> None:
+        # A separate, best-effort pass: subtitle fetching (rate limits, missing
+        # tracks, etc.) must never take down a video download that already succeeded.
+        try:
+            sub_opts = {
+                "skip_download": True,
+                "quiet": True,
+                "writesubtitles": True,
+                "writeautomaticsub": True,
+                "subtitleslangs": ["ru", "en"],
+                "outtmpl": f"{self.dest_dir}/{stem}.%(ext)s",
+            }
+            with yt_dlp.YoutubeDL(sub_opts) as ydl:
+                ydl.extract_info(self.url, download=True)
+        except Exception as e:  # noqa: BLE001 -- subtitles are a bonus, never fatal
+            log.warning("ytdlp.subtitles_skipped", url=self.url, error=str(e))
 
     def _spotdl(self) -> dict:
         # Drive spotdl's library API in-process rather than shelling out to the "spotdl"
@@ -316,13 +351,40 @@ class DownloadWorker(QThread):
         target = self._make_unique(Path(self.dest_dir) / f"{title}.mp3")
         self.progress.emit(40, "Скачивание с Яндекс.Музыки…")
         track.download(str(target))
+        self._tag_yandex_track(target, track)
         return {"title": title, "path": str(target), "kind": "audio", "site": "yandex-music"}
+
+    @staticmethod
+    def _tag_yandex_track(path: Path, track) -> None:
+        # Track.download() only saves raw audio -- unlike spotdl, yandex-music doesn't
+        # embed ID3 tags or cover art itself, so do it ourselves.
+        from mutagen.id3 import APIC, ID3, TALB, TDRC, TIT2, TPE1, ID3NoHeaderError
+
+        try:
+            tags = ID3(path)
+        except ID3NoHeaderError:
+            tags = ID3()
+        tags["TIT2"] = TIT2(encoding=3, text=track.title)
+        if track.artists:
+            tags["TPE1"] = TPE1(encoding=3, text=", ".join(a.name for a in track.artists))
+        if track.albums:
+            album = track.albums[0]
+            tags["TALB"] = TALB(encoding=3, text=album.title)
+            year = getattr(album, "year", None)
+            if year:
+                tags["TDRC"] = TDRC(encoding=3, text=str(year))
+        try:
+            cover = track.download_cover_bytes(size="400x400")
+            tags["APIC"] = APIC(encoding=3, mime="image/jpeg", type=3, desc="Cover", data=cover)
+        except Exception as e:  # noqa: BLE001 -- cover art is a bonus, never fatal
+            log.warning("yandex.cover_skipped", error=str(e))
+        tags.save(path)
 
 
 class ResolveWorker(QThread):
     """Checks whether a URL is a playlist/album before the real download starts."""
 
-    resolved = Signal(list)  # [] if not a playlist, else [(title, item_url), ...]
+    resolved = Signal(str, list)  # ("", []) if not a playlist, else (collection_title, [(title, item_url), ...])
     failed = Signal(str)
 
     def __init__(self, url: str, yandex_token: str):
@@ -332,22 +394,24 @@ class ResolveWorker(QThread):
 
     def run(self) -> None:
         try:
-            items = resolve_playlist(self.url, self.yandex_token)
-            self.resolved.emit(items or [])
+            result = resolve_playlist(self.url, self.yandex_token)
+            name, items = result if result else ("", [])
+            self.resolved.emit(name, items)
         except Exception as e:  # noqa: BLE001 -- surfaced to the UI as a plain error, not fatal
             log.error("resolve.failed", url=self.url, error=str(e))
             self.failed.emit(str(e))
 
 
 class PlaylistDialog(QDialog):
-    def __init__(self, items: list[tuple[str, str]], parent=None):
+    def __init__(self, name: str, items: list[tuple[str, str]], parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Плейлист / альбом")
+        self.setWindowTitle(name or "Плейлист / альбом")
         self.resize(480, 420)
         self.items = items
 
         layout = QVBoxLayout(self)
-        layout.addWidget(QLabel(f"Найдено {len(items)} треков/видео. Выбери, что скачать:"))
+        layout.addWidget(QLabel(f"«{name}» — найдено {len(items)}. Выбери, что скачать:"))
+        layout.addWidget(QLabel(f"Сохранится в подпапку «{name}»."))
 
         self.list_widget = QListWidget()
         for title, _ref in items:
@@ -455,9 +519,15 @@ class MainWindow(QMainWindow):
         self.url_edit.textChanged.connect(self._on_url_changed)
         self.quality_combo = QComboBox()
         self.quality_combo.addItems(QUALITIES.keys())
+        self.open_browser_btn = QPushButton("🌐")
+        self.open_browser_btn.setObjectName("secondary")
+        self.open_browser_btn.setFixedWidth(40)
+        self.open_browser_btn.setToolTip("Открыть ссылку в браузере")
+        self.open_browser_btn.clicked.connect(self._open_current_url)
         row1.addWidget(self.url_edit, 3)
         row1.addWidget(self.format_combo, 1)
         row1.addWidget(self.quality_combo, 1)
+        row1.addWidget(self.open_browser_btn)
         layout.addLayout(row1)
 
         # Destination row
@@ -582,6 +652,11 @@ class MainWindow(QMainWindow):
             self.state["yandex_token"] = dlg.token()
             save_state(self.state)
 
+    def _open_current_url(self) -> None:
+        url = self.url_edit.text().strip()
+        if url:
+            QDesktopServices.openUrl(QUrl(url))
+
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
         self.overlay.setGeometry(self.centralWidget().rect())
@@ -618,7 +693,9 @@ class MainWindow(QMainWindow):
         self._set_busy(True, "Проверяю ссылку…")
 
         self._resolver = ResolveWorker(url, self.state.get("yandex_token", ""))
-        self._resolver.resolved.connect(lambda items: self._on_resolved(items, url, kind, container, dest, max_height))
+        self._resolver.resolved.connect(
+            lambda name, items: self._on_resolved(name, items, url, kind, container, dest, max_height)
+        )
         self._resolver.failed.connect(self._on_resolve_failed)
         self._resolver.start()
 
@@ -627,14 +704,14 @@ class MainWindow(QMainWindow):
         self._set_status(f"Ошибка: {message}", "err")
 
     def _on_resolved(
-        self, items: list, url: str, kind: str, container: str, dest: str, max_height: int | None
+        self, name: str, items: list, url: str, kind: str, container: str, dest: str, max_height: int | None
     ) -> None:
         if not items:
             self._begin_single(url, kind, container, dest, max_height)
             return
 
         self._set_busy(False)
-        dlg = PlaylistDialog(items, self)
+        dlg = PlaylistDialog(name, items, self)
         if dlg.exec() != QDialog.Accepted:
             self._set_status("Отменено", "err")
             return
@@ -642,7 +719,8 @@ class MainWindow(QMainWindow):
         if not chosen:
             self._set_status("Ничего не выбрано", "err")
             return
-        self._start_batch(chosen, kind, container, dest, max_height)
+        subfolder = re.sub(r'[\\/:*?"<>|]', "_", name).strip() or "Playlist"
+        self._start_batch(chosen, kind, container, str(Path(dest) / subfolder), max_height)
 
     def _begin_single(self, url: str, kind: str, container: str, dest: str, max_height: int | None) -> None:
         self._queue_total = 0
@@ -815,14 +893,24 @@ class MainWindow(QMainWindow):
             top.addChild(child)
             top.setExpanded(False)
 
+            actions_child = QTreeWidgetItem([""])
+            top.addChild(actions_child)
+            actions_row = QWidget()
+            actions_layout = QHBoxLayout(actions_row)
+            actions_layout.setContentsMargins(0, 0, 0, 0)
             if on_disk:
-                play_child = QTreeWidgetItem([""])
-                top.addChild(play_child)
-                btn = QPushButton("▶ Открыть в плеере")
-                btn.setObjectName("secondary")
+                play_btn = QPushButton("▶ Открыть в плеере")
+                play_btn.setObjectName("secondary")
                 path, kind, title = entry["path"], entry["kind"], entry["title"]
-                btn.clicked.connect(lambda _=None, p=path, k=kind, t=title: self._load_into_player(p, k, t))
-                self.history_tree.setItemWidget(play_child, 0, btn)
+                play_btn.clicked.connect(lambda _=None, p=path, k=kind, t=title: self._load_into_player(p, k, t))
+                actions_layout.addWidget(play_btn)
+            link_btn = QPushButton("🌐 Открыть ссылку")
+            link_btn.setObjectName("secondary")
+            entry_url = entry["url"]
+            link_btn.clicked.connect(lambda _=None, u=entry_url: QDesktopServices.openUrl(QUrl(u)))
+            actions_layout.addWidget(link_btn)
+            actions_layout.addStretch()
+            self.history_tree.setItemWidget(actions_child, 0, actions_row)
 
     def _delete_selected_history(self) -> None:
         top_items = [it for it in self.history_tree.selectedItems() if it.parent() is None]
