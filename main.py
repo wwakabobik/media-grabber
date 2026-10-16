@@ -90,46 +90,70 @@ def _yandex_track_title(track) -> str:
     return f"{artists} - {track.title}"
 
 
-_spotdl_client = None  # spotdl's SpotifyClient is a process-wide singleton; re-init raises
+class _SpotdlHandle:
+    """Thin per-call stand-in for spotdl's Spotdl class, deliberately never
+    shared across threads -- see _get_spotdl_client for why."""
+
+    def __init__(self, downloader):
+        self.downloader = downloader
+
+    def search(self, query: list[str]):
+        from spotdl.utils.search import parse_query
+
+        s = self.downloader.settings
+        return parse_query(
+            query=query,
+            threads=s["threads"],
+            use_ytm_data=s["ytm_data"],
+            playlist_numbering=s["playlist_numbering"],
+            album_type=s["album_type"],
+            playlist_retain_track_cover=s["playlist_retain_track_cover"],
+        )
+
+    def download(self, song):
+        return self.downloader.download_song(song)
 
 
-def _get_spotdl_client(output_template: str):
-    """Returns the process-wide Spotdl client, with its Downloader rebuilt fresh
-    for the calling thread.
+def _get_spotdl_client(output_template: str) -> _SpotdlHandle:
+    """Returns a fresh, thread-private handle for talking to spotdl.
 
-    spotdl's Downloader binds an asyncio event loop + semaphore to whichever
-    thread constructs it (Downloader.__init__ creates its own loop and calls
-    asyncio.set_event_loop() on it). Reusing one Downloader across QThreads --
-    each its own real OS thread -- breaks with "There is no current event loop
-    in thread 'Dummy-N'" or "The future belongs to a different loop", both
-    reproduced in isolation with a plain QThread calling spotdl directly.
-    SpotifyClient (the actual Spotify auth) is a true one-per-process singleton
-    that raises if initialized twice, so only the Downloader -- which carries
-    no such process-wide state -- gets rebuilt here, once per calling thread.
+    Previous attempts reused one Spotdl/Downloader across calls (a module-level
+    singleton, rebuilt per call to dodge the next problem). Both failed because
+    DownloadWorker, ResolveWorker and the debounced PreviewWorker are each their
+    own QThread, started close together by normal use (e.g. typing a URL fires
+    a preview fetch ~700ms later, often overlapping a Download click) -- and
+    reproduced directly, two such calls racing on a shared singleton throw any
+    of: "There is no current event loop in thread 'Dummy-N'", "The future
+    belongs to a different loop", "A spotify client has already been
+    initialized", or "cannot schedule new futures after shutdown" (one thread's
+    rebuild tearing down a Downloader the other thread is still using).
 
-    simple_tui=True is required on every rebuild: a non-simple Downloader opens
-    a rich.progress.Progress "Live" display in its ProgressHandler.__init__,
-    and only one Live may be active per process -- rebuilding the Downloader
-    without it raises "Only one live display may be active at once" on the
-    second call. This app has its own Qt progress bar; spotdl's console TUI
-    was never wired to anything here anyway.
+    The only part of spotdl that must truly be one-per-process is SpotifyClient
+    (the Spotify auth; spotipy's own global, raises if initialized twice) --
+    and that's fine to leave initialized and shared read-only. The Downloader
+    (event loop + semaphore + thread pool) is rebuilt fresh on every single
+    call instead, so no two threads ever touch the same one.
+
+    simple_tui=True is required: a non-simple Downloader opens a
+    rich.progress.Progress "Live" display in its ProgressHandler.__init__, and
+    only one Live may be active per process -- building more than one without
+    it raises "Only one live display may be active at once". This app has its
+    own Qt progress bar; spotdl's console TUI was never wired to anything here.
     """
-    global _spotdl_client
     from spotdl.download.downloader import Downloader
+    from spotdl.utils.config import DEFAULT_CONFIG
+    from spotdl.utils.spotify import SpotifyClient, SpotifyError
 
-    if _spotdl_client is None:
-        from spotdl import Spotdl
-        from spotdl.utils.config import DEFAULT_CONFIG
-
-        _spotdl_client = Spotdl(
+    try:
+        SpotifyClient.init(
             client_id=DEFAULT_CONFIG["client_id"],
             client_secret=DEFAULT_CONFIG["client_secret"],
-            downloader_settings={"output": output_template, "simple_tui": True},
         )
-    else:
-        settings = {**_spotdl_client.downloader.settings, "output": output_template, "simple_tui": True}
-        _spotdl_client.downloader = Downloader(settings=settings)
-    return _spotdl_client
+    except SpotifyError:
+        pass  # already initialized by an earlier call -- that's exactly the point
+
+    downloader = Downloader(settings={"output": output_template, "simple_tui": True})
+    return _SpotdlHandle(downloader)
 
 
 def read_media_info(path: str) -> dict:
@@ -705,7 +729,15 @@ class HistoryCard(QWidget):
         self.outer.setContentsMargins(12, 10, 12, 10)
         self.outer.setSpacing(8)
 
-        header = QHBoxLayout()
+        # A plain QWidget container (not just a layout) so clicking anywhere on the
+        # row -- not just the chevron button -- toggles it too. QCheckBox/QPushButton
+        # consume their own mouse presses, so this only fires for clicks that land on
+        # the title/status/empty space, never stealing the checkbox or chevron click.
+        header_widget = QWidget()
+        header_widget.setCursor(Qt.PointingHandCursor)
+        header_widget.mousePressEvent = lambda event: self._toggle()
+        header = QHBoxLayout(header_widget)
+        header.setContentsMargins(0, 0, 0, 0)
         header.setSpacing(16)
         self.checkbox = QCheckBox()
         header.addWidget(self.checkbox)
@@ -723,7 +755,7 @@ class HistoryCard(QWidget):
         self.toggle_btn.setIcon(icon("chevron-right", t["icon"]))
         self.toggle_btn.clicked.connect(self._toggle)
         header.addWidget(self.toggle_btn)
-        self.outer.addLayout(header)
+        self.outer.addWidget(header_widget)
 
         # The expanded detail (cover art, duration, description/lyrics, action
         # buttons) is built lazily on first expand, not here: read_media_info()

@@ -102,35 +102,37 @@ def test_friendly_error_passes_through_other_messages():
     assert friendly_error("https://youtube.com/watch?v=x", "some other error") == "some other error"
 
 
-def test_get_spotdl_client_rebuilds_downloader_per_call_not_the_client():
-    # Reproduced for real: reusing one spotdl Downloader across QThreads (each a
-    # distinct OS thread) raises "There is no current event loop in thread
-    # 'Dummy-N'" or "The future belongs to a different loop" -- Downloader binds
-    # an asyncio loop/semaphore to whichever thread constructs it. The fix is to
-    # keep the Spotdl/SpotifyClient singleton (which raises if re-initialized)
-    # but rebuild just the Downloader fresh on every call.
+def test_get_spotdl_client_never_shares_a_downloader_across_calls():
+    # Reproduced for real: a shared Downloader (or a shared Spotdl whose
+    # .downloader gets reassigned) races when two QThreads call this close
+    # together, which happens in normal use -- typing a URL fires a debounced
+    # preview fetch ~700ms later, often overlapping a Download click. That
+    # race threw, depending on timing: "There is no current event loop in
+    # thread 'Dummy-N'", "The future belongs to a different loop", "A spotify
+    # client has already been initialized", or "cannot schedule new futures
+    # after shutdown". The fix: every call gets its own independent Downloader
+    # (own event loop/semaphore/thread pool); only SpotifyClient.init() (a true
+    # process-wide auth singleton, safe to share read-only) stays guarded.
+    from spotdl.utils.spotify import SpotifyError
+
     import main
 
-    main._spotdl_client = None
-    fake_spotdl_cls = MagicMock()
     fake_downloader_cls = MagicMock()
-    first_downloader = MagicMock(settings={"output": "old", "simple_tui": False})
-    fake_spotdl_cls.return_value.downloader = first_downloader
+    fake_downloader_cls.side_effect = lambda settings: MagicMock(settings=settings)
+    fake_spotify_client_init = MagicMock(side_effect=[None, SpotifyError("already")])
 
-    with patch("spotdl.Spotdl", fake_spotdl_cls), patch(
-        "spotdl.download.downloader.Downloader", fake_downloader_cls
+    with patch("spotdl.download.downloader.Downloader", fake_downloader_cls), patch(
+        "spotdl.utils.spotify.SpotifyClient.init", fake_spotify_client_init
     ):
         client1 = main._get_spotdl_client("{title}.mp3")
-        fake_spotdl_cls.assert_called_once()  # Spotdl()/SpotifyClient.init() only once
-
         client2 = main._get_spotdl_client("{title}.flac")
-        assert client2 is client1  # same Spotdl/SpotifyClient singleton
-        fake_spotdl_cls.assert_called_once()  # still only once -- never re-initialized
-        fake_downloader_cls.assert_called_once()  # Downloader rebuilt for the 2nd call
-        new_settings = fake_downloader_cls.call_args.kwargs["settings"]
-        assert new_settings["output"] == "{title}.flac"
-        assert new_settings["simple_tui"] is True  # no rich Live display in a GUI app
-        assert client1.downloader is fake_downloader_cls.return_value
+
+    assert client1.downloader is not client2.downloader  # never the same instance
+    assert client1.downloader.settings["output"] == "{title}.mp3"
+    assert client2.downloader.settings["output"] == "{title}.flac"
+    assert fake_spotify_client_init.call_count == 2  # called every time
+    # the second call's "already initialized" SpotifyError must not propagate
+    assert client2.downloader.settings["simple_tui"] is True
 
     main._spotdl_client = None
 
