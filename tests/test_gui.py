@@ -306,7 +306,10 @@ def test_main_window_content_is_scrollable_when_window_is_too_small(qtbot, tmp_p
     win = MainWindow()
     qtbot.addWidget(win)
     win.resize(820, 500)
+    win.show()  # the scroll area only recomputes its range on a real show/resize cycle
     win._load_into_player(str(f), "video", "A Clip")
+    win._toggle_history_collapsed()  # history starts collapsed; expand it so there's enough content
+    qtbot.wait(10)
 
     outer = win.centralWidget()
     assert isinstance(outer, QScrollArea)
@@ -371,6 +374,61 @@ def test_main_window_player_section_hidden_until_something_is_loaded(qtbot, tmp_
     f.write_bytes(b"x")
     win._load_into_player(str(f), "audio", "A Track")
     assert win.player_section.isHidden() is False
+
+
+def test_main_window_history_collapsed_by_default(qtbot):
+    win = MainWindow()
+    qtbot.addWidget(win)
+    assert win.history_body.isHidden() is True
+
+    win._toggle_history_collapsed()
+    assert win.history_body.isHidden() is False
+
+    win._toggle_history_collapsed()
+    assert win.history_body.isHidden() is True
+
+
+def test_main_window_editing_url_hides_the_loaded_player(qtbot, tmp_path):
+    f = tmp_path / "track.mp3"
+    f.write_bytes(b"x")
+    win = MainWindow()
+    qtbot.addWidget(win)
+    win._load_into_player(str(f), "audio", "A Track")
+    assert win.player_section.isHidden() is False
+
+    win.url_edit.setText("https://example.com/something")
+    assert win.player_section.isHidden() is True
+
+
+def test_main_window_editing_url_before_anything_was_ever_loaded_is_a_noop(qtbot):
+    win = MainWindow()
+    qtbot.addWidget(win)
+    assert win.player_section.isHidden() is True
+
+    win.url_edit.setText("https://example.com/something")
+    assert win.player_section.isHidden() is True  # still hidden, nothing weird happens
+
+
+def test_main_window_load_into_player_clears_the_url_field_and_shows_again(qtbot, tmp_path):
+    f = tmp_path / "track.mp3"
+    f.write_bytes(b"x")
+    win = MainWindow()
+    qtbot.addWidget(win)
+    win.url_edit.setText("https://example.com/pending")
+
+    win._load_into_player(str(f), "audio", "A Track")
+
+    assert win.url_edit.text() == ""
+    assert win.player_section.isHidden() is False  # re-shown despite the clear hiding it in between
+
+
+def test_main_window_editing_url_hides_a_live_preview(qtbot, tmp_path):
+    win = MainWindow()
+    qtbot.addWidget(win)
+    win.preview_card.show()
+
+    win.url_edit.setText("https://example.com/something-else")
+    assert win.preview_card.isHidden() is True
 
 
 def test_main_window_retranslate_ui_switches_button_text(qtbot):

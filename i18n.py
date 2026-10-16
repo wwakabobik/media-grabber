@@ -102,6 +102,7 @@ STRINGS: dict[str, dict[str, str]] = {
     "button.download": {"en": "Download", "ru": "Скачать"},
     "status.ready": {"en": "Ready", "ru": "Готов к работе"},
     "tooltip.collapse_video": {"en": "Collapse/expand video", "ru": "Свернуть/развернуть видео"},
+    "tooltip.collapse_history": {"en": "Collapse/expand history", "ru": "Свернуть/развернуть историю"},
     "button.description_lyrics": {"en": "Description / lyrics", "ru": "Описание / текст песни"},
     "button.save_as": {"en": " Save as…", "ru": " Сохранить как…"},
     "heading.history": {"en": "History", "ru": "История"},

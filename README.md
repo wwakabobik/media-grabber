@@ -27,12 +27,12 @@ right in the window — no browser, no external player.
 ## Design
 
 A minimalist glass look (translucent cards, soft gradients, rounded corners, one consistent
-button style) with a Light / Dark / System theme picker in the header next to Settings,
-persisted between runs; System follows the OS's own appearance live, including a change made
-while the app is open. Icons are small hand-drawn lucide-style SVGs tinted per theme at render
-time — no icon font, no asset files. QSS can't do the OS's real frosted-glass blur (that needs
-native `NSVisualEffectView`, out of scope for a Qt app — see Known limitations), so this fakes
-the vibe with translucency and soft borders instead.
+button style) with an icon-only Light / Dark / System theme picker and an icon-only Settings
+button, both in the header, persisted between runs; System follows the OS's own appearance
+live, including a change made while the app is open. Icons are small hand-drawn lucide-style
+SVGs tinted per theme at render time — no icon font, no asset files. QSS can't do the OS's real
+frosted-glass blur (that needs native `NSVisualEffectView`, out of scope for a Qt app — see
+Known limitations), so this fakes the vibe with translucency and soft borders instead.
 
 ## How it gets the media
 
@@ -80,15 +80,17 @@ set of formats, since that's a local `ffmpeg` transcode, not a download.
   while a download is in flight — hidden the rest of the time, not stuck at a stale 0%/100%.
 - Built-in preview player ([Qt Multimedia](https://doc.qt.io/qt-6/qtmultimedia-index.html)) for
   both video and audio — play/pause, seek — so nothing needs to be opened in another app. Stays
-  out of the way (hidden) until something is actually loaded into it.
-- History with multi-select, plus "Select all" / "Clear selection" scoped to whatever the
-  current search/filters are showing — not the whole history — so e.g. filtering by status
-  "Missing" then selecting all is the bulk-cleanup path for files deleted outside the app. Every
-  attempt (success or failure) is kept, with the error message for failed ones. Delete selected
-  entries from the list only, or from disk as well. An entry whose file was removed outside the
-  app is shown greyed out instead of crashing or lying about its status. A repeat download of
-  the same title never overwrites the previous file — it gets a `(1)`, `(2)`, ... suffix, like a
-  browser's download manager.
+  out of the way (hidden) until something is actually loaded into it, and editing the URL hides
+  it again (it belongs to a different link now) along with any live preview showing — it comes
+  back once that download finishes or a history entry is loaded, which also clears the URL field.
+- History is collapsed by default (click the chevron next to "History" to open it), plus
+  "Select all" / "Clear selection" scoped to whatever the current search/filters are showing —
+  not the whole history — so e.g. filtering by status "Missing" then selecting all is the
+  bulk-cleanup path for files deleted outside the app. Every attempt (success or failure) is
+  kept, with the error message for failed ones. Delete selected entries from the list only, or
+  from disk as well. An entry whose file was removed outside the app is shown greyed out instead
+  of crashing or lying about its status. A repeat download of the same title never overwrites
+  the previous file — it gets a `(1)`, `(2)`, ... suffix, like a browser's download manager.
 - **🌐 Open in browser**: open the pasted link, or any history entry's original link, in your
   default browser without leaving the app.
 - Playlist/album links open a checkbox picker instead of downloading blind; picked items queue
