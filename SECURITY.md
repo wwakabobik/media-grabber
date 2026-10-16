@@ -27,5 +27,14 @@ A few things that are *known* and not considered vulnerabilities to report:
 - This app downloads and executes `ffmpeg` postprocessing over files it itself fetches from
   the URL you give it — it does not execute arbitrary third-party code, but a malicious
   video/audio file processed by `ffmpeg` is the same trust boundary any such tool has.
+- Dependabot flags several `starlette`/`anyio` CVEs (DoS, SSRF, request-smuggling-style issues
+  in their HTTP server code). Both come in transitively via `spotdl` → `fastapi==0.103.x`,
+  which hard-pins old `starlette`/`anyio` ranges upstream — not something this repo can bump on
+  its own without either waiting for spotdl to move off that `fastapi` pin, or forcing a
+  starlette major-version jump that's very likely incompatible with it. In practice this app
+  never starts spotdl's bundled web server (only its Spotify-search/download client functions
+  are used), so the vulnerable HTTP-request-handling code paths are never reachable at runtime
+  — tracked, not silently ignored, but not worth a risky forced override for a server this app
+  never runs.
 - Dependency vulnerabilities are tracked via GitHub's Dependabot alerts and version-update PRs
   (`.github/dependabot.yml`), not manually.
