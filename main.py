@@ -17,7 +17,7 @@ from pathlib import Path
 os.environ.setdefault("QT_MAC_WANTS_LAYER", "1")  # frozen/signed .app: video widget renders black without this
 
 import yt_dlp
-from PySide6.QtCore import QThread, QUrl, Qt, Signal
+from PySide6.QtCore import Qt, QThread, QUrl, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QVideoWidget
@@ -66,7 +66,7 @@ def load_state() -> dict:
     if STATE_PATH.exists():
         try:
             return json.loads(STATE_PATH.read_text())
-        except Exception:
+        except (json.JSONDecodeError, OSError):
             pass
     return {"last_dest": DEFAULT_DEST, "history": []}
 
@@ -98,7 +98,7 @@ class DownloadWorker(QThread):
             else:
                 result = self._ytdlp()
             self.finished_ok.emit(result)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 -- yt-dlp/spotdl raise all sorts; surface whatever it is to the UI
             self.failed.emit(str(e))
 
     def _hook(self, d: dict) -> None:
@@ -177,6 +177,7 @@ class DownloadWorker(QThread):
             capture_output=True,
             text=True,
             timeout=600,
+            check=False,
         )
         if result.returncode != 0:
             raise RuntimeError(result.stderr[-1500:] or "spotdl завершился с ошибкой")
