@@ -142,6 +142,21 @@ QSlider::handle:horizontal {{
     background: {t["accent"]}; width: 15px; height: 15px; margin: -5px 0; border-radius: 7px;
 }}
 QSlider::sub-page:horizontal {{ background: {t["accent"]}; border-radius: 2px; }}
+
+QCheckBox::indicator {{
+    width: 17px; height: 17px; border-radius: 5px;
+    border: 1px solid {t["border"]}; background: {t["surface_solid"]};
+}}
+QCheckBox::indicator:checked {{ background: {t["accent"]}; border-color: {t["accent"]}; }}
+
+QTextEdit {{
+    background-color: {t["surface_solid"]};
+    border: 1px solid {t["border"]};
+    border-radius: 10px;
+    padding: 8px;
+}}
+
+QScrollArea {{ border: none; }}
 """
 
 
@@ -179,6 +194,8 @@ _ICON_PATHS: dict[str, str] = {
     "check": '<path d="M4 12l6 6L20 6"/>',
     "alert": '<path d="M12 3L2 20h20z"/><path d="M12 9v5"/><circle cx="12" cy="17" r="0.8" fill="currentColor"/>',
     "download": '<path d="M12 3v12M7 11l5 5 5-5M5 20h14"/>',
+    "chevron-down": '<path d="M6 9l6 6 6-6"/>',
+    "chevron-right": '<path d="M9 6l6 6-6 6"/>',
 }
 
 
