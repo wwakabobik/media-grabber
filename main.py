@@ -21,6 +21,7 @@ from PySide6.QtCore import QThread, QUrl, Qt, Signal
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QApplication,
     QComboBox,
     QFileDialog,
@@ -264,9 +265,18 @@ class MainWindow(QMainWindow):
         self.player.playbackStateChanged.connect(self._on_playback_state)
 
         # History
-        layout.addWidget(QLabel("История"))
+        history_header = QHBoxLayout()
+        history_header.addWidget(QLabel("История"))
+        history_header.addStretch()
+        self.delete_history_btn = QPushButton("Удалить выбранное")
+        self.delete_history_btn.setObjectName("secondary")
+        self.delete_history_btn.clicked.connect(self._delete_selected_history)
+        history_header.addWidget(self.delete_history_btn)
+        layout.addLayout(history_header)
+
         self.history_tree = QTreeWidget()
         self.history_tree.setHeaderHidden(True)
+        self.history_tree.setSelectionMode(QAbstractItemView.ExtendedSelection)
         layout.addWidget(self.history_tree, 2)
         self._render_history()
 
@@ -289,6 +299,7 @@ class MainWindow(QMainWindow):
             self.dest_edit,
             self.browse_btn,
             self.download_btn,
+            self.delete_history_btn,
         ]
         self._on_format_changed(self.format_combo.currentText())
 
@@ -411,22 +422,30 @@ class MainWindow(QMainWindow):
 
     def _render_history(self) -> None:
         self.history_tree.clear()
-        for entry in self.state.get("history", []):
+        for idx, entry in enumerate(self.state.get("history", [])):
             icon = "🎬" if entry.get("kind") == "video" else "🎵"
-            mark = "✅" if entry.get("status") == "ok" else "⚠️"
+            on_disk = entry.get("status") == "ok" and Path(entry.get("path", "")).exists()
+            missing = entry.get("status") == "ok" and not on_disk
+            mark = "✅" if on_disk else ("🗑" if missing else "⚠️")
+
             top = QTreeWidgetItem([f"{mark} {icon} {entry['title']}  —  {entry['ts']}"])
+            top.setData(0, Qt.UserRole, idx)
             self.history_tree.addTopLevelItem(top)
+            if missing:
+                top.setDisabled(True)  # file gone from disk: show as info only, no actions
 
             detail_lines = [f"URL: {entry['url']}", f"Формат: {entry.get('container', '?')}", f"Источник: {entry.get('site', '?')}"]
             if entry.get("status") == "ok":
                 detail_lines.append(f"Файл: {entry.get('path', '?')}")
+                if missing:
+                    detail_lines.append("(файл удалён с диска)")
             else:
                 detail_lines.append(f"Ошибка: {entry.get('error', '?')}")
             child = QTreeWidgetItem(["\n".join(detail_lines)])
             top.addChild(child)
             top.setExpanded(False)
 
-            if entry.get("status") == "ok":
+            if on_disk:
                 play_child = QTreeWidgetItem([""])
                 top.addChild(play_child)
                 btn = QPushButton("▶ Открыть в плеере")
@@ -434,6 +453,36 @@ class MainWindow(QMainWindow):
                 path, kind, title = entry["path"], entry["kind"], entry["title"]
                 btn.clicked.connect(lambda _=None, p=path, k=kind, t=title: self._load_into_player(p, k, t))
                 self.history_tree.setItemWidget(play_child, 0, btn)
+
+    def _delete_selected_history(self) -> None:
+        top_items = [it for it in self.history_tree.selectedItems() if it.parent() is None]
+        if not top_items:
+            QMessageBox.information(self, "media-grabber", "Выбери хотя бы одну запись в истории.")
+            return
+
+        box = QMessageBox(self)
+        box.setWindowTitle("media-grabber")
+        box.setText(f"Удалить {len(top_items)} запись(ей) из истории?")
+        only_list_btn = box.addButton("Только из списка", QMessageBox.AcceptRole)
+        with_disk_btn = box.addButton("И с диска", QMessageBox.DestructiveRole)
+        box.addButton("Отмена", QMessageBox.RejectRole)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked not in (only_list_btn, with_disk_btn):
+            return
+
+        history = self.state.get("history", [])
+        indices = sorted({it.data(0, Qt.UserRole) for it in top_items}, reverse=True)
+        for idx in indices:
+            entry = history[idx]
+            if clicked is with_disk_btn and entry.get("status") == "ok":
+                try:
+                    Path(entry["path"]).unlink(missing_ok=True)
+                except OSError as e:
+                    QMessageBox.warning(self, "media-grabber", f"Не удалось удалить файл {entry['path']}: {e}")
+            del history[idx]
+        save_state(self.state)
+        self._render_history()
 
 
 def main() -> None:
