@@ -1795,7 +1795,7 @@ class MainWindow(QMainWindow):
         checked = [c.checkbox.isChecked() for c in self._history_cards]
         self.select_all_btn.setVisible(not all(checked))  # all([]) is True -> hidden when the list is empty too
         self.select_none_btn.setVisible(any(checked))
-        self.delete_history_btn.show()
+        self.delete_history_btn.setVisible(any(checked))
 
     def _on_position(self, pos: int) -> None:
         if not self.seek_slider.isSliderDown():

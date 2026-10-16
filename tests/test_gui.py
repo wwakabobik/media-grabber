@@ -655,16 +655,24 @@ def test_main_window_select_all_only_checks_the_currently_filtered_cards(qtbot, 
     assert all(not c.checkbox.isChecked() for c in win._history_cards)
 
 
-def test_main_window_history_action_buttons_hidden_while_collapsed(qtbot):
+def test_main_window_history_action_buttons_hidden_while_collapsed(qtbot, tmp_path):
+    f = tmp_path / "a.mp3"
+    f.write_bytes(b"x")
     win = MainWindow()
     qtbot.addWidget(win)
+    win.state["history"] = [
+        {"ts": "now", "url": "https://a", "title": "A", "kind": "audio",
+         "container": "mp3", "site": "yt-dlp", "status": "ok", "path": str(f)},
+    ]
+    win._render_history()
+    win._history_cards[0].checkbox.setChecked(True)
     assert win._history_collapsed is True
     assert win.select_all_btn.isHidden() is True
     assert win.select_none_btn.isHidden() is True
-    assert win.delete_history_btn.isHidden() is True
+    assert win.delete_history_btn.isHidden() is True  # hidden while collapsed even with something checked
 
     win._toggle_history_collapsed()
-    assert win.delete_history_btn.isHidden() is False
+    assert win.delete_history_btn.isHidden() is False  # checked from before collapsing, still checked now
 
 
 def test_main_window_select_all_and_none_visibility_follows_checkbox_state(qtbot, tmp_path):
@@ -684,18 +692,22 @@ def test_main_window_select_all_and_none_visibility_follows_checkbox_state(qtbot
 
     assert win.select_all_btn.isHidden() is False  # something still unchecked
     assert win.select_none_btn.isHidden() is True  # nothing checked yet
+    assert win.delete_history_btn.isHidden() is True  # nothing checked yet
 
     win._history_cards[0].checkbox.setChecked(True)
     assert win.select_all_btn.isHidden() is False  # "B" still unchecked
     assert win.select_none_btn.isHidden() is False  # "A" is checked now
+    assert win.delete_history_btn.isHidden() is False
 
     win._history_cards[1].checkbox.setChecked(True)
     assert win.select_all_btn.isHidden() is True  # everything is checked
     assert win.select_none_btn.isHidden() is False
+    assert win.delete_history_btn.isHidden() is False
 
     win._set_all_history_checked(False)
     assert win.select_all_btn.isHidden() is False
     assert win.select_none_btn.isHidden() is True
+    assert win.delete_history_btn.isHidden() is True
 
 
 def test_convert_targets_cover_the_expected_formats():
