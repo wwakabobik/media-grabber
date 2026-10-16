@@ -23,7 +23,14 @@ right in the window — no browser, no external player.
 - **Playlists / albums / multi-track links** (YouTube playlists, SoundCloud sets, Spotify
   albums/playlists, Yandex Music albums/playlists) are detected before downloading: a picker
   dialog lists every track/video with a checkbox so you choose what actually gets downloaded,
-  then they're fetched one by one with per-item progress.
+  then they're fetched one by one with per-item progress into a subfolder named after the
+  playlist/album (so they land together, not scattered loose in the destination folder).
+- **Metadata**: cover art, title/uploader/description get embedded automatically (YouTube/Vimeo/
+  SoundCloud/VK via yt-dlp's thumbnail+metadata postprocessors; Spotify via spotdl, which already
+  embeds full ID3 tags + cover art; Yandex Music tagged by hand with `mutagen`, since the library
+  only saves raw audio). Video downloads also get `.srt`/`.vtt` subtitle files alongside, when
+  available — fetched as a separate best-effort pass so a subtitle hiccup never breaks the actual
+  video download.
 
 Realistic format choices: **MP4 / WebM** video, **MP3** audio. AVI isn't offered — none of these
 sites serve it, so there'd be nothing to download into that container. Spotify and Yandex Music
@@ -43,6 +50,8 @@ hit an error.
   whose file was removed outside the app is shown greyed out instead of crashing or lying about
   its status. A repeat download of the same title never overwrites the previous file — it gets
   a `(1)`, `(2)`, ... suffix, like a browser's download manager.
+- **🌐 Open in browser**: open the pasted link, or any history entry's original link, in your
+  default browser without leaving the app.
 - Playlist/album links open a checkbox picker instead of downloading blind; picked items queue
   up and download one at a time, each landing in the history individually.
 - Persisted to `~/.config/media-grabber/state.json`.
