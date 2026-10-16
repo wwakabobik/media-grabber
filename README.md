@@ -1,6 +1,7 @@
 # media-grabber
 
 [![Lint & Test](https://github.com/wwakabobik/media-grabber/actions/workflows/lint.yml/badge.svg?branch=master)](https://github.com/wwakabobik/media-grabber/actions/workflows/lint.yml)
+[![Release](https://img.shields.io/github/v/release/wwakabobik/media-grabber)](https://github.com/wwakabobik/media-grabber/releases)
 [![License: MIT](https://img.shields.io/github/license/wwakabobik/media-grabber)](LICENSE)
 ![Python](https://img.shields.io/badge/python-3.12%2B-blue)
 ![Platform](https://img.shields.io/badge/platform-macOS-lightgrey)
@@ -42,9 +43,11 @@ vibe with translucency and soft borders instead.
 - **Metadata**: cover art, title/uploader/description get embedded automatically (YouTube/Vimeo/
   SoundCloud/VK via yt-dlp's thumbnail+metadata postprocessors; Spotify via spotdl, which already
   embeds full ID3 tags + cover art; Yandex Music tagged by hand with `mutagen`, since the library
-  only saves raw audio). Video downloads also get `.srt`/`.vtt` subtitle files alongside, when
-  available — fetched as a separate best-effort pass so a subtitle hiccup never breaks the actual
-  video download.
+  only saves raw audio). Video downloads also get `.ru`/`.en` `.vtt` subtitle files alongside,
+  fetched one language at a time as a separate best-effort pass (so a rate limit on one language,
+  or no captions at all, never breaks the actual video download or costs you the other language).
+  Spotify lyrics (via spotdl's own lyrics providers) and Yandex Music lyrics (via its own lyrics
+  API) are picked up when available and viewable/exportable right from the app — see Features.
 
 Realistic format choices: **MP4 / WebM** video, **MP3** audio. AVI isn't offered — none of these
 sites serve it, so there'd be nothing to download into that container. Spotify and Yandex Music
@@ -67,7 +70,17 @@ hit an error.
 - **🌐 Open in browser**: open the pasted link, or any history entry's original link, in your
   default browser without leaving the app.
 - Playlist/album links open a checkbox picker instead of downloading blind; picked items queue
-  up and download one at a time, each landing in the history individually.
+  up and download one at a time, each landing in the history individually, into a subfolder
+  named after the playlist/album.
+- **Live preview**: ~700ms after a URL settles, a background fetch shows its title, duration and
+  cover art above the Download button — so you see what you're about to grab before committing,
+  not just after.
+- Each history entry shows cover art, duration and the download timestamp, and expands into
+  "Открыть в плеере" / "Показать в Finder" / "Открыть ссылку" actions. A search box above the
+  list filters by title/URL/source/format live.
+- Description (YouTube/Vimeo/SoundCloud/VK) or lyrics (Spotify/Yandex Music), when available, show
+  in the history entry and next to the in-app player, with a "Сохранить как…" button to export
+  to a `.txt` file wherever you like.
 - Persisted to `~/.config/media-grabber/state.json`.
 - Structured logging ([structlog](https://www.structlog.org/)): human-readable in the console,
   JSON with keyword context (url, kind, path, errors...) in a rotating file at
@@ -84,6 +97,10 @@ hit an error.
   flow like Spotify's) — without one, Yandex links fail with a clear "add a token" error.
 - SoundCloud's *original* (highest-quality) format needs login too; without it yt-dlp falls back
   to the standard transcoded stream, which works fine but isn't the uploader's original file.
+- **Vimeo currently fails for most videos** with `"The web client only works when logged-in"` —
+  an upstream restriction Vimeo added that yt-dlp's cookie-less extraction can't work around.
+  YouTube/SoundCloud/VK were all verified with real end-to-end downloads; Vimeo needs a logged-in
+  session (cookies) to fix, which this app doesn't support and isn't planned to.
 - The "glass" look is QSS translucency + soft borders, not real compositor blur — Qt widgets
   can't get native macOS vibrancy without a lot more platform-specific plumbing.
 
@@ -124,14 +141,20 @@ The result is in `dist/MediaGrabber.app` — copy it to `/Applications` to insta
 
 ## Contributing
 
-`master` is protected — all changes land via pull request and must pass CI (`ruff` + `pytest`)
-before they can be merged.
+See [CONTRIBUTING.md](CONTRIBUTING.md). Short version: `master` is protected — every change
+lands via pull request and must pass CI (`ruff` + `pytest`, all green) before it can be merged,
+including for the repo owner. Every merge gets a semver tag + GitHub Release (see
+[CHANGELOG.md](CHANGELOG.md)) — bump `pyproject.toml`'s version yourself for a real
+feature/breaking change, otherwise it gets an automatic patch bump on merge.
 
 ```bash
 uv sync --all-groups
 uv run ruff check .
 uv run pytest -q
 ```
+
+Found a security issue? See [SECURITY.md](SECURITY.md) — please don't open a public issue for
+it.
 
 ## Donations
 

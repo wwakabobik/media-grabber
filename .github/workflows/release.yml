@@ -1,0 +1,55 @@
+name: Release
+
+# Tags and releases every merge to master. Never pushes to the branch itself --
+# master is protected (PR required, even for admins), so this only ever creates a
+# tag + GitHub Release, which branch protection doesn't restrict.
+on:
+  push:
+    branches:
+      - master
+
+jobs:
+  tag-and-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Compute the version to release
+        id: ver
+        run: |
+          set -euo pipefail
+          LAST_TAG="$(git tag --list 'v*' --sort=-v:refname | head -1)"
+          PYVER="$(grep -m1 '^version = ' pyproject.toml | sed -E 's/version = "(.*)"/\1/')"
+
+          if [ -z "$LAST_TAG" ]; then
+            # No tags yet: this is the bootstrap release, just trust pyproject.toml.
+            NEXT="$PYVER"
+          else
+            BASE="${LAST_TAG#v}"
+            # If the PR bumped pyproject.toml's version past the last tag, that's a
+            # deliberate minor/major (or patch) bump -- respect it. Otherwise this
+            # merge gets an automatic patch/build bump, so every merge still ships.
+            HIGHER="$(printf '%s\n%s\n' "$BASE" "$PYVER" | sort -V | tail -1)"
+            if [ "$HIGHER" = "$PYVER" ] && [ "$PYVER" != "$BASE" ]; then
+              NEXT="$PYVER"
+            else
+              IFS='.' read -r MAJOR MINOR PATCH <<< "$BASE"
+              NEXT="$MAJOR.$MINOR.$((PATCH + 1))"
+            fi
+          fi
+
+          echo "version=$NEXT" >> "$GITHUB_OUTPUT"
+
+      - name: Tag and create the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          VERSION="v${{ steps.ver.outputs.version }}"
+          git tag "$VERSION"
+          git push origin "$VERSION"
+          gh release create "$VERSION" --title "$VERSION" --generate-notes

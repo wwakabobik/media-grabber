@@ -1,6 +1,6 @@
 [project]
 name = "media-grabber"
-version = "0.1.0"
+version = "0.7.0"
 description = "Desktop app: paste a YouTube/Vimeo/Spotify URL, pick a format, download, preview in-app"
 requires-python = ">=3.12"
 dependencies = [
@@ -14,7 +14,9 @@ dependencies = [
 
 [dependency-groups]
 dev = [
+    "pillow>=12.3.0",
     "pyinstaller>=6.22.3",
     "pytest>=9.1.1",
+    "pytest-qt>=4.5.0",
     "ruff>=0.17.1",
 ]
